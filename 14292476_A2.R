@@ -345,6 +345,185 @@ cluster_contribution <- merge(
 )
 
 cluster_contribution
+
 # =========================================================
+# Calculate habitat score
+
+mem_cols <- paste0("mem_cluster_", 1:best_k)
+mem_cols %in% names(bird_fuzzy_data)
+
+# Extract membership columns and drop geometry
+membership_df <- st_drop_geometry(
+  bird_fuzzy_data[, mem_cols]
+)
+# Convert all membership columns to numeric
+membership_df[] <- lapply(
+  membership_df,
+  function(x) as.numeric(as.character(x))
+)
+
+# Convert to numeric matrix
+membership_mat <- as.matrix(membership_df)
+
+# Make sure contribution values are ordered correctly
+cluster_contribution <- cluster_contribution[
+  order(cluster_contribution$lc_cluster),
+]
+
+sr_coef <- cluster_contribution$SR_contribution
+abs_coef <- cluster_contribution$Abs_contribution
+
+
+# =========================================================
+# Calculate SR-based habitat score
+bird_fuzzy_data$habitat_SR <- as.numeric(
+  membership_mat %*% sr_coef
+)
+# Calculate Abs-based habitat score
+bird_fuzzy_data$habitat_Abs <- as.numeric(
+  membership_mat %*% abs_coef
+)
+
+# Standardise habitat scores to 0-1
+bird_fuzzy_data$habitat_SR_01 <- (
+  bird_fuzzy_data$habitat_SR -
+    min(bird_fuzzy_data$habitat_SR, na.rm = TRUE)
+) / (
+  max(bird_fuzzy_data$habitat_SR, na.rm = TRUE) -
+    min(bird_fuzzy_data$habitat_SR, na.rm = TRUE)
+)
+
+bird_fuzzy_data$habitat_Abs_01 <- (
+  bird_fuzzy_data$habitat_Abs -
+    min(bird_fuzzy_data$habitat_Abs, na.rm = TRUE)
+) / (
+  max(bird_fuzzy_data$habitat_Abs, na.rm = TRUE) -
+    min(bird_fuzzy_data$habitat_Abs, na.rm = TRUE)
+)
+
+
+# Calculate combined habitat score
+bird_fuzzy_data$habitat_score <- (
+  bird_fuzzy_data$habitat_SR_01 *
+    bird_fuzzy_data$habitat_Abs_01
+) 
+
+
+# Plot habitat scores
+
+par(mfrow = c(1, 3))
+
+plot(
+  bird_fuzzy_data["habitat_SR_01"],
+  main = "SR-based habitat score"
+)
+
+plot(
+  bird_fuzzy_data["habitat_Abs_01"],
+  main = "Abs-based habitat score"
+)
+
+plot(
+  bird_fuzzy_data["habitat_score"],
+  main = "Combined habitat score"
+)
+
+par(mfrow = c(1, 1))
+
+# Check habitat score summary
+summary(
+  bird_fuzzy_data[, c(
+    "habitat_SR",
+    "habitat_Abs",
+    "habitat_SR_01",
+    "habitat_Abs_01",
+    "habitat_score"
+  )]
+)
+
+
+
+# =========================================================
+# Calculate neighbourhood effect
+hab_var <- "habitat_score"
+
+touch_list <- st_touches(bird_fuzzy_data)
+
+# Count number of neighbours for each cell
+bird_fuzzy_data$n_neighbours <- lengths(touch_list)
+
+# Calculate mean habitat score of neighbouring cells
+
+bird_fuzzy_data$neighbour_habitat_mean <- NA
+
+for (i in seq_len(nrow(bird_fuzzy_data))) {
+  
+  neigh_ids <- touch_list[[i]]
+  
+  if (length(neigh_ids) > 0) {
+    
+    bird_fuzzy_data$neighbour_habitat_mean[i] <- mean(
+      bird_fuzzy_data[[hab_var]][neigh_ids],
+      na.rm = TRUE
+    )
+    
+  }
+}
+
+# Calculate whether neighbourhood effect is positive or negative
+
+global_habitat_mean <- mean(
+  bird_fuzzy_data[[hab_var]],
+  na.rm = TRUE
+)
+
+bird_fuzzy_data$neighbour_effect <- 
+  bird_fuzzy_data$neighbour_habitat_mean - global_habitat_mean
+
+bird_fuzzy_data$neighbour_effect_type <- ifelse(
+  bird_fuzzy_data$neighbour_effect >= 0,
+  "Positive",
+  "Negative"
+)
+
+bird_fuzzy_data$neighbour_effect_type <- as.factor(
+  bird_fuzzy_data$neighbour_effect_type
+)
+
+# Strengthen or weaken habitat score
+
+alpha <- 0.3
+
+bird_fuzzy_data$habitat_score_context <- 
+  bird_fuzzy_data[[hab_var]] +
+  alpha * bird_fuzzy_data$neighbour_effect
+
+# Keep final score between 0 and 1
+bird_fuzzy_data$habitat_score_context <- pmax(
+  0,
+  pmin(1, bird_fuzzy_data$habitat_score_context)
+)
+
+
+# Map neighbourhood effect
+
+par(mfrow = c(1, 3))
+
+plot(
+  bird_fuzzy_data["neighbour_habitat_mean"],
+  main = "Mean habitat score of 8 neighbours"
+)
+
+plot(
+  bird_fuzzy_data["neighbour_effect"],
+  main = "Neighbourhood effect"
+)
+
+plot(
+  bird_fuzzy_data["habitat_score_context"],
+  main = "Context-adjusted habitat score"
+)
+
+par(mfrow = c(1, 1))
 
 
