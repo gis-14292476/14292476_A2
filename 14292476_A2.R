@@ -527,3 +527,29 @@ plot(
 par(mfrow = c(1, 1))
 
 
+
+# =========================================================
+# Define potential habitat cells
+
+hab_threshold <- quantile(
+  bird_fuzzy_data$habitat_score_context,
+  probs = 0.70,
+  na.rm = TRUE
+)
+
+hab_threshold
+
+bird_fuzzy_data$potential_habitat <- ifelse(
+  bird_fuzzy_data$habitat_score_context >= hab_threshold,
+  1,0
+)
+
+bird_fuzzy_data$potential_habitat <- as.factor(
+  bird_fuzzy_data$potential_habitat
+)
+
+plot(
+  bird_fuzzy_data["potential_habitat"],
+  main = "Potential habitat cells"
+)
+
