@@ -143,7 +143,7 @@ rownames(lc_kmeans_data) <- lc_grid_summary$grid_id
 
 # Elbow method for choosing k
 
-max_k <- 20
+max_k <- 15
 wss <- numeric(max_k)
 
 for (k in 1:max_k) {
@@ -171,7 +171,7 @@ plot(
 
 # Final k-means clustering
 
-best_k <- 7
+best_k <- 5
 
 lc_kmeans <- kmeans(
   lc_kmeans_data,
@@ -259,4 +259,92 @@ cluster_membership$grid_id <- lc_grid_summary$grid_id
 
 head(cluster_membership)
 
+
 # =========================================================
+# Estimate contribution of each land-cover cluster to SR and Abs
+# Join fuzzy membership back to land-cover grid summary
+lc_grid_summary <- merge(
+  lc_grid_summary,
+  cluster_membership,
+  by = "grid_id",
+  all.x = TRUE
+)
+
+names(lc_grid_summary)
+
+# Join bird response variables with cluster membership
+bird_fuzzy_data <- merge(
+  birds_grid,
+  lc_grid_summary[, c("grid_id", paste0("mem_cluster_", 1:best_k), "lc_cluster")],
+  by = "grid_id",
+  all.x = TRUE
+)
+
+# Make sure response variables are numeric
+bird_fuzzy_data$SR <- as.numeric(bird_fuzzy_data$SR)
+bird_fuzzy_data$Abs <- as.numeric(bird_fuzzy_data$Abs)
+
+# Standardise SR and Abs
+bird_fuzzy_data$SR_z <- as.numeric(scale(bird_fuzzy_data$SR))
+
+bird_fuzzy_data$Abs_log <- log1p(bird_fuzzy_data$Abs)
+
+bird_fuzzy_data$Abs_log_z <- as.numeric(scale(bird_fuzzy_data$Abs_log))
+
+# Model cluster contribution to SR
+
+mem_cols <- paste0("mem_cluster_", 1:best_k)
+
+sr_formula <- as.formula(
+  paste(
+    "SR_z ~ 0 +",
+    paste(mem_cols, collapse = " + ")
+  )
+)
+
+sr_cluster_model <- lm(
+  sr_formula,
+  data = bird_fuzzy_data
+)
+
+summary(sr_cluster_model)
+
+
+# Model cluster contribution to Abs
+
+abs_formula <- as.formula(
+  paste(
+    "Abs_log_z ~ 0 +",
+    paste(mem_cols, collapse = " + ")
+  )
+)
+
+abs_cluster_model <- lm(
+  abs_formula,
+  data = bird_fuzzy_data
+)
+
+summary(abs_cluster_model)
+
+# Summarise cluster contribution
+
+sr_contribution <- data.frame(
+  lc_cluster = 1:best_k,
+  SR_contribution = coef(sr_cluster_model)
+)
+
+abs_contribution <- data.frame(
+  lc_cluster = 1:best_k,
+  Abs_contribution = coef(abs_cluster_model)
+)
+
+cluster_contribution <- merge(
+  sr_contribution,
+  abs_contribution,
+  by = "lc_cluster"
+)
+
+cluster_contribution
+# =========================================================
+
+
