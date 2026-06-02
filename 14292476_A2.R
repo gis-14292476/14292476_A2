@@ -8,9 +8,7 @@ library(terra)
 library(dplyr)
 library(tidyr)
 
-
-
-
+# =========================================================
 
 # Read data
 birds_grid <- st_read("./data/Birds/GM_Birds_2025.shp")
@@ -44,13 +42,10 @@ lc_n2c <- data.frame(
   lc_name = c("Woodland","Conifer","Arable",
               "Grassland","Moor","Bog",
               "Water","Saltmarsh","Urban")
-  )
+)
 lc_extract <- merge(lc_extract,lc_n2c,by = "lc_class",all.x = TRUE)
 
-
-
-
-
+# =========================================================
 
 # Calculate land-cover proportions by grid cell
 
@@ -127,30 +122,40 @@ lc_combo_count <- lc_combo_count[
 n_lc_combos
 lc_combo_count
 
-
-
-
-
+# =========================================================
 
 # Cluster fishnet cells by land-cover proportions
-lc_prop_cols <- lc_n2c$lc_name
-missing_cols <- setdiff(lc_prop_cols, names(lc_grid_summary))
 
+# Prepare land-cover proportion data
+lc_prop_cols <- lc_n2c$lc_name
+missing_cols <- setdiff(lc_prop_cols,names(lc_grid_summary))
 for (col in missing_cols) {lc_grid_summary[[col]] <- 0}
 
-# Prepare k-means data
+# land-cover proportion columns for clustering
 lc_kmeans_data <- lc_grid_summary[, lc_prop_cols]
+
+# Replace NA with zero
 lc_kmeans_data[is.na(lc_kmeans_data)] <- 0
+
+# Use grid_id as row names
 rownames(lc_kmeans_data) <- lc_grid_summary$grid_id
 
 
-# Elbow method
+# Elbow method for choosing k
+
 max_k <- 20
 wss <- numeric(max_k)
 
 for (k in 1:max_k) {
-  km <- kmeans(lc_kmeans_data, centers = k, nstart = 100)
+  
+  km <- kmeans(
+    lc_kmeans_data,
+    centers = k,
+    nstart = 100
+  )
+  
   wss[k] <- km$tot.withinss
+  
 }
 
 plot(
@@ -174,11 +179,11 @@ lc_kmeans <- kmeans(
   nstart = 100
 )
 
+# Add hard cluster labels
 lc_grid_summary$lc_cluster <- lc_kmeans$cluster
 
 
-# Summarise clusters
-
+# Summarise land-cover composition of each cluster
 lc_cluster_summary <- aggregate(
   lc_grid_summary[, lc_prop_cols],
   by = list(lc_cluster = lc_grid_summary$lc_cluster),
@@ -187,8 +192,8 @@ lc_cluster_summary <- aggregate(
 
 lc_cluster_summary
 
-
 # Map land-cover clusters
+
 birds_grid_map <- merge(
   birds_grid,
   lc_grid_summary[, c("grid_id", "lc_cluster")],
@@ -202,3 +207,56 @@ plot(
   birds_grid_map["lc_cluster"],
   main = "Spatial distribution of land-cover clusters"
 )
+
+
+# Fuzzy membership of land-cover clusters
+
+# Calculate distance to each cluster centre
+
+cluster_centres <- lc_kmeans$centers
+
+dist_to_centres <- matrix(
+  NA,
+  nrow = nrow(lc_kmeans_data),
+  ncol = nrow(cluster_centres)
+)
+
+for (i in 1:nrow(lc_kmeans_data)) {
+  
+  for (j in 1:nrow(cluster_centres)) {
+    
+    dist_to_centres[i, j] <- sqrt(
+      sum(
+        (
+          as.numeric(lc_kmeans_data[i, ]) -
+            as.numeric(cluster_centres[j, ])
+        )^2
+      )
+    )
+    
+  }
+  
+}
+
+colnames(dist_to_centres) <- paste0("dist_cluster_", 1:best_k)
+rownames(dist_to_centres) <- rownames(lc_kmeans_data)
+
+head(dist_to_centres)
+
+
+# Convert distance to fuzzy membership
+
+# Convert distance to similarity.
+similarity <- 1 / (dist_to_centres + 1e-6)
+
+cluster_membership <- similarity / rowSums(similarity)
+
+cluster_membership <- as.data.frame(cluster_membership)
+
+names(cluster_membership) <- paste0("mem_cluster_", 1:best_k)
+
+cluster_membership$grid_id <- lc_grid_summary$grid_id
+
+head(cluster_membership)
+
+# =========================================================
