@@ -128,3 +128,77 @@ n_lc_combos
 lc_combo_count
 
 
+
+
+
+
+# Cluster fishnet cells by land-cover proportions
+lc_prop_cols <- lc_n2c$lc_name
+missing_cols <- setdiff(lc_prop_cols, names(lc_grid_summary))
+
+for (col in missing_cols) {lc_grid_summary[[col]] <- 0}
+
+# Prepare k-means data
+lc_kmeans_data <- lc_grid_summary[, lc_prop_cols]
+lc_kmeans_data[is.na(lc_kmeans_data)] <- 0
+rownames(lc_kmeans_data) <- lc_grid_summary$grid_id
+
+
+# Elbow method
+max_k <- 20
+wss <- numeric(max_k)
+
+for (k in 1:max_k) {
+  km <- kmeans(lc_kmeans_data, centers = k, nstart = 100)
+  wss[k] <- km$tot.withinss
+}
+
+plot(
+  1:max_k,
+  wss,
+  type = "b",
+  pch = 19,
+  xlab = "Number of clusters (k)",
+  ylab = "Total within-cluster sum of squares",
+  main = "Elbow method for land-cover clustering"
+)
+
+
+# Final k-means clustering
+
+best_k <- 7
+
+lc_kmeans <- kmeans(
+  lc_kmeans_data,
+  centers = best_k,
+  nstart = 100
+)
+
+lc_grid_summary$lc_cluster <- lc_kmeans$cluster
+
+
+# Summarise clusters
+
+lc_cluster_summary <- aggregate(
+  lc_grid_summary[, lc_prop_cols],
+  by = list(lc_cluster = lc_grid_summary$lc_cluster),
+  FUN = mean
+)
+
+lc_cluster_summary
+
+
+# Map land-cover clusters
+birds_grid_map <- merge(
+  birds_grid,
+  lc_grid_summary[, c("grid_id", "lc_cluster")],
+  by = "grid_id",
+  all.x = TRUE
+)
+
+birds_grid_map$lc_cluster <- as.factor(birds_grid_map$lc_cluster)
+
+plot(
+  birds_grid_map["lc_cluster"],
+  main = "Spatial distribution of land-cover clusters"
+)
