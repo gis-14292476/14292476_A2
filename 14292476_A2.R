@@ -1,7 +1,8 @@
-
+# =========================================================
+# 0. Project setup
+# =========================================================
 setwd("F:/14292476_A2")
 set.seed(33)
-
 
 library(sf)
 library(terra)
@@ -9,7 +10,8 @@ library(dplyr)
 library(tidyr)
 
 # =========================================================
-
+# 1. Read and preprocess spatial data
+# =========================================================
 # Read data
 birds_grid <- st_read("./data/Birds/GM_Birds_2025.shp")
 birds_lcm  <- rast("./data/Birds/gm_lcm_2022.tif")
@@ -23,6 +25,9 @@ birds_grid$grid_id <- seq_len(nrow(birds_grid))
 # Check CRS
 crs(birds_grid) == crs(birds_lcm)
 
+# =========================================================
+# 2. Clip and extract land-cover raster values
+# =========================================================
 # Clip land-cover
 birds_vect <- vect(birds_grid)
 
@@ -36,6 +41,9 @@ names(lc_extract) <- c("grid_id", "lc_class")
 # Delete 0 = NA
 lc_extract <- subset(lc_extract,!is.na(lc_class) & lc_class != 0)
 
+# =========================================================
+# 3. Reclassify land-cover codes
+# =========================================================
 # Land-cover class table
 lc_n2c <- data.frame(
   lc_class = c(1, 2, 3, 4, 5, 6, 7, 8, 9),
@@ -46,9 +54,8 @@ lc_n2c <- data.frame(
 lc_extract <- merge(lc_extract,lc_n2c,by = "lc_class",all.x = TRUE)
 
 # =========================================================
-
-# Calculate land-cover proportions by grid cell
-
+# 4. Calculate land-cover composition per grid cell
+# =========================================================
 # Count the number for each land-cover
 lc_counts <- aggregate(
   lc_class ~ grid_id + lc_name,
@@ -103,10 +110,9 @@ lc_prop_wide <- tidyr::pivot_wider(
 lc_grid_summary <- merge( lc_n_types, lc_combo, by = "grid_id" )
 lc_grid_summary <- merge( lc_grid_summary, lc_prop_wide, by = "grid_id" )
 
-
-
-
-
+# =========================================================
+# 5. Summarise land-cover combinations
+# =========================================================
 # Count different land-cover combinations
 n_lc_combos <- length(unique(lc_grid_summary$lc_combo))
 
@@ -123,9 +129,8 @@ n_lc_combos
 lc_combo_count
 
 # =========================================================
-
-# Cluster fishnet cells by land-cover proportions
-
+# 6. Cluster grid cells by land-cover composition
+# =========================================================
 # Prepare land-cover proportion data
 lc_prop_cols <- lc_n2c$lc_name
 missing_cols <- setdiff(lc_prop_cols,names(lc_grid_summary))
@@ -208,10 +213,10 @@ plot(
   main = "Spatial distribution of land-cover clusters"
 )
 
-
-# Fuzzy membership of land-cover clusters
-
-# Calculate distance to each cluster centre
+# =========================================================
+# 7. Calculate fuzzy membership to land-cover clusters
+# =========================================================
+# Calculate distance to each cluster center
 
 cluster_centres <- lc_kmeans$centers
 
@@ -259,9 +264,9 @@ cluster_membership$grid_id <- lc_grid_summary$grid_id
 
 head(cluster_membership)
 
-
 # =========================================================
-# Estimate contribution of each land-cover cluster to SR and Abs
+# 8. Join bird data with land-cover cluster membership
+# =========================================================
 # Join fuzzy membership back to land-cover grid summary
 lc_grid_summary <- merge(
   lc_grid_summary,
@@ -280,7 +285,9 @@ bird_fuzzy_data <- merge(
   all.x = TRUE
 )
 
-# Make sure response variables are numeric
+# =========================================================
+# 9. Prepare bird response variables
+# =========================================================
 bird_fuzzy_data$SR <- as.numeric(bird_fuzzy_data$SR)
 bird_fuzzy_data$Abs <- as.numeric(bird_fuzzy_data$Abs)
 
@@ -291,8 +298,9 @@ bird_fuzzy_data$Abs_log <- log1p(bird_fuzzy_data$Abs)
 
 bird_fuzzy_data$Abs_log_z <- as.numeric(scale(bird_fuzzy_data$Abs_log))
 
-# Model cluster contribution to SR
-
+# =========================================================
+# 10. Estimate cluster contribution from bird responses
+# =========================================================
 mem_cols <- paste0("mem_cluster_", 1:best_k)
 
 sr_formula <- as.formula(
@@ -346,12 +354,12 @@ cluster_contribution <- merge(
 
 cluster_contribution
 
-# =========================================================
-# Calculate habitat score
-
 mem_cols <- paste0("mem_cluster_", 1:best_k)
 mem_cols %in% names(bird_fuzzy_data)
 
+# =========================================================
+# 11. Calculate habitat suitability score
+# =========================================================
 # Extract membership columns and drop geometry
 membership_df <- st_drop_geometry(
   bird_fuzzy_data[, mem_cols]
@@ -372,7 +380,6 @@ cluster_contribution <- cluster_contribution[
 
 sr_coef <- cluster_contribution$SR_contribution
 abs_coef <- cluster_contribution$Abs_contribution
-
 
 # =========================================================
 # Calculate SR-based habitat score
@@ -441,10 +448,9 @@ summary(
   )]
 )
 
-
-
 # =========================================================
-# Calculate neighbourhood effect
+# 12. Calculate neighbourhood effect
+# =========================================================
 hab_var <- "habitat_score"
 
 touch_list <- st_touches(bird_fuzzy_data)
@@ -526,11 +532,9 @@ plot(
 
 par(mfrow = c(1, 1))
 
-
-
 # =========================================================
-# Define potential habitat cells
-
+# 13. Define potential habitat cells
+# =========================================================
 hab_threshold <- quantile(
   bird_fuzzy_data$habitat_score_context,
   probs = 0.70,
@@ -552,4 +556,3 @@ plot(
   bird_fuzzy_data["potential_habitat"],
   main = "Potential habitat cells"
 )
-
