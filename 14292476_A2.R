@@ -11,6 +11,7 @@ library(tidyr)
 
 
 
+
 # Read data
 birds_grid <- st_read("./data/Birds/GM_Birds_2025.shp")
 birds_lcm  <- rast("./data/Birds/gm_lcm_2022.tif")
@@ -45,6 +46,7 @@ lc_n2c <- data.frame(
               "Water","Saltmarsh","Urban")
   )
 lc_extract <- merge(lc_extract,lc_n2c,by = "lc_class",all.x = TRUE)
+
 
 
 
@@ -106,6 +108,23 @@ lc_prop_wide <- tidyr::pivot_wider(
 lc_grid_summary <- merge( lc_n_types, lc_combo, by = "grid_id" )
 lc_grid_summary <- merge( lc_grid_summary, lc_prop_wide, by = "grid_id" )
 
-lc_grid_summary
+
+
+
+
+# Count different land-cover combinations
+n_lc_combos <- length(unique(lc_grid_summary$lc_combo))
+
+# Count the number of fishnet cells for each combination
+lc_combo_count <- as.data.frame(table(lc_grid_summary$lc_combo))
+names(lc_combo_count) <- c("lc_combo", "n_fishnet")
+
+# Sort from most common to least common
+lc_combo_count <- lc_combo_count[
+  order(lc_combo_count$n_fishnet, decreasing = TRUE),
+]
+
+n_lc_combos
+lc_combo_count
 
 
