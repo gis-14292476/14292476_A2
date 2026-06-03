@@ -660,71 +660,578 @@ summary(
   )]
 )
 
+
 # =========================================================
-# 11.Calculate neighbourhood effect
+# 11. Cluster-patch-level boundary and high-value adjustment
 # =========================================================
 
 hab_var <- "habitat_score"
-
-# Find neighbouring cells
-touch_list <- st_touches(bird_fuzzy_data)
-
-# Count number of neighbours for each cell
-bird_fuzzy_data$n_neighbours <- lengths(touch_list)
-
-# Calculate mean habitat score of neighbouring cells
-
-bird_fuzzy_data$neighbour_habitat_mean <- NA
-
-for (i in seq_len(nrow(bird_fuzzy_data))) {
+# Prepare coordinate keys
+if (!all(c("cell_x", "cell_y") %in% names(bird_fuzzy_data))) {
   
-  neigh_ids <- touch_list[[i]]
+  cell_xy <- st_coordinates(
+    st_centroid(bird_fuzzy_data)
+  )
   
-  if (length(neigh_ids) > 0) {
-    
-    bird_fuzzy_data$neighbour_habitat_mean[i] <- mean(
-      bird_fuzzy_data[[hab_var]][neigh_ids],
-      na.rm = TRUE
-    )
-    
-  }
+  bird_fuzzy_data$cell_x <- cell_xy[, 1]
+  bird_fuzzy_data$cell_y <- cell_xy[, 2]
 }
 
-# Calculate relative neighbourhood effect
-# Positive value:
-# neighbouring cells are better than the focal cell
+bird_fuzzy_data$x_key <- round(
+  bird_fuzzy_data$cell_x,
+  6
+)
 
-# Negative value:
-# neighbouring cells are worse than the focal cell
+bird_fuzzy_data$y_key <- round(
+  bird_fuzzy_data$cell_y,
+  6
+)
 
-bird_fuzzy_data$neighbour_effect <- 
-  bird_fuzzy_data$neighbour_habitat_mean -
-  bird_fuzzy_data[[hab_var]]
+bird_fuzzy_data$xy_key <- paste(
+  bird_fuzzy_data$x_key,
+  bird_fuzzy_data$y_key,
+  sep = "_"
+)
 
-
-bird_fuzzy_data$neighbour_effect_type <- ifelse(
-  bird_fuzzy_data$neighbour_effect > 0,
-  "Positive",
-  ifelse(
-    bird_fuzzy_data$neighbour_effect < 0,
-    "Negative",
-    "Neutral"
+x_vals <- sort(
+  unique(
+    bird_fuzzy_data$x_key
   )
 )
 
-bird_fuzzy_data$neighbour_effect_type <- as.factor(
-  bird_fuzzy_data$neighbour_effect_type
+y_vals <- sort(
+  unique(
+    bird_fuzzy_data$y_key
+  )
 )
 
-# Adjust habitat score using neighbourhood effect
-alpha <- 0.3
+grid_dx <- median(
+  diff(x_vals),
+  na.rm = TRUE
+)
+
+grid_dy <- median(
+  diff(y_vals),
+  na.rm = TRUE
+)
+
+cell_lookup <- data.frame(
+  row_id = seq_len(
+    nrow(bird_fuzzy_data)
+  ),
+  xy_key = bird_fuzzy_data$xy_key
+)
+
+# Helper function: get same-cluster ratio
+
+get_same_cluster_ratio <- function(x_shift, y_shift) {
+  
+  ratio_out <- rep(
+    NA_real_,
+    nrow(bird_fuzzy_data)
+  )
+  
+  n_out <- rep(
+    NA_integer_,
+    nrow(bird_fuzzy_data)
+  )
+  
+  for (i in seq_len(nrow(bird_fuzzy_data))) {
+    
+    target_key <- paste(
+      round(
+        bird_fuzzy_data$x_key[i] + x_shift,
+        6
+      ),
+      round(
+        bird_fuzzy_data$y_key[i] + y_shift,
+        6
+      ),
+      sep = "_"
+    )
+    
+    neigh_id <- cell_lookup$row_id[
+      match(
+        target_key,
+        cell_lookup$xy_key
+      )
+    ]
+    
+    neigh_id <- neigh_id[
+      !is.na(neigh_id)
+    ]
+    
+    if (length(neigh_id) > 0) {
+      
+      same_cluster <- 
+        bird_fuzzy_data$lc_cluster[neigh_id] ==
+        bird_fuzzy_data$lc_cluster[i]
+      
+      n_out[i] <- length(neigh_id)
+      
+      ratio_out[i] <- mean(
+        same_cluster,
+        na.rm = TRUE
+      )
+    }
+  }
+  
+  data.frame(
+    n = n_out,
+    ratio = ratio_out
+  )
+}
+
+# Calculate rook same-cluster ratio
+
+rook_N <- get_same_cluster_ratio(0, grid_dy)
+rook_S <- get_same_cluster_ratio(0, -grid_dy)
+rook_W <- get_same_cluster_ratio(-grid_dx, 0)
+rook_E <- get_same_cluster_ratio(grid_dx, 0)
+
+rook_ratio_mat <- cbind(
+  rook_N$ratio,
+  rook_S$ratio,
+  rook_W$ratio,
+  rook_E$ratio
+)
+
+bird_fuzzy_data$n_rook_neighbours <- rowSums(
+  !is.na(rook_ratio_mat)
+)
+
+bird_fuzzy_data$rook_same_cluster_ratio <- rowMeans(
+  rook_ratio_mat,
+  na.rm = TRUE
+)
+
+bird_fuzzy_data$rook_same_cluster_ratio[
+  is.na(bird_fuzzy_data$rook_same_cluster_ratio)
+] <- 0.5
+
+bird_fuzzy_data$strict_rook_interior <- 
+  bird_fuzzy_data$n_rook_neighbours == 4 &
+  bird_fuzzy_data$rook_same_cluster_ratio == 1
+
+bird_fuzzy_data$edge_boundary_type <- ifelse(
+  bird_fuzzy_data$strict_rook_interior,
+  "Interior",
+  "Boundary"
+)
+
+bird_fuzzy_data$edge_boundary_type <- as.factor(
+  bird_fuzzy_data$edge_boundary_type
+)
+
+table(
+  bird_fuzzy_data$edge_boundary_type
+)
+
+# Identify connected cluster patches
+
+touch_list_all <- st_touches(
+  bird_fuzzy_data
+)
+
+cluster_patch_graph_edges <- data.frame(
+  from = integer(),
+  to = integer()
+)
+
+for (i in seq_len(nrow(bird_fuzzy_data))) {
+  
+  neigh_i <- touch_list_all[[i]]
+  
+  if (length(neigh_i) > 0) {
+    
+    same_cluster_neigh <- neigh_i[
+      bird_fuzzy_data$lc_cluster[neigh_i] ==
+        bird_fuzzy_data$lc_cluster[i]
+    ]
+    
+    if (length(same_cluster_neigh) > 0) {
+      
+      cluster_patch_graph_edges <- rbind(
+        cluster_patch_graph_edges,
+        data.frame(
+          from = i,
+          to = same_cluster_neigh
+        )
+      )
+    }
+  }
+}
+
+if (nrow(cluster_patch_graph_edges) == 0) {
+  
+  bird_fuzzy_data$cluster_patch_id <- seq_len(
+    nrow(bird_fuzzy_data)
+  )
+  
+} else {
+  
+  cluster_patch_graph <- graph_from_data_frame(
+    cluster_patch_graph_edges,
+    directed = FALSE,
+    vertices = data.frame(
+      name = seq_len(
+        nrow(bird_fuzzy_data)
+      )
+    )
+  )
+  
+  cluster_patch_comp <- components(
+    cluster_patch_graph
+  )
+  
+  bird_fuzzy_data$cluster_patch_id <- cluster_patch_comp$membership[
+    as.character(
+      seq_len(nrow(bird_fuzzy_data))
+    )
+  ]
+}
+
+bird_fuzzy_data$cluster_patch_id <- as.integer(
+  bird_fuzzy_data$cluster_patch_id
+)
+
+length(
+  unique(
+    bird_fuzzy_data$cluster_patch_id
+  )
+)
+
+# Calculate cluster-patch-level habitat signal
+
+cluster_patch_summary <- bird_fuzzy_data %>%
+  st_drop_geometry() %>%
+  group_by(
+    cluster_patch_id
+  ) %>%
+  summarise(
+    lc_cluster = first(
+      lc_cluster
+    ),
+    patch_n_cells = n(),
+    patch_mean_habitat_score = mean(
+      habitat_score,
+      na.rm = TRUE
+    ),
+    patch_max_habitat_score = max(
+      habitat_score,
+      na.rm = TRUE
+    ),
+    patch_median_habitat_score = median(
+      habitat_score,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+cluster_patch_summary
+
+
+# Define high-value cluster patches
+
+cluster_patch_high_threshold <- quantile(
+  bird_fuzzy_data$habitat_score,
+  probs = 0.70,
+  na.rm = TRUE
+)
+
+cluster_patch_summary$patch_high_value <- ifelse(
+  cluster_patch_summary$patch_max_habitat_score >=
+    cluster_patch_high_threshold,
+  1,
+  0
+)
+
+table(
+  cluster_patch_summary$patch_high_value
+)
+
+
+# Join patch-level metrics back to grid cells.
+
+bird_fuzzy_data <- bird_fuzzy_data %>%
+  select(
+    -any_of(
+      c(
+        "patch_n_cells",
+        "patch_mean_habitat_score",
+        "patch_max_habitat_score",
+        "patch_median_habitat_score",
+        "patch_high_value"
+      )
+    )
+  ) %>%
+  left_join(
+    cluster_patch_summary %>%
+      select(
+        cluster_patch_id,
+        patch_n_cells,
+        patch_mean_habitat_score,
+        patch_max_habitat_score,
+        patch_median_habitat_score,
+        patch_high_value
+      ),
+    by = "cluster_patch_id"
+  )
+
+# Prepare signed cluster weights
+
+cluster_weight_table <- stable_SR_coef %>%
+  mutate(
+    lc_cluster = as.numeric(
+      gsub(
+        "mem_cluster_",
+        "",
+        cluster
+      )
+    ),
+    cluster_weight_raw = mean_coef,
+    cluster_weight = cluster_weight_raw /
+      max(
+        abs(cluster_weight_raw),
+        na.rm = TRUE
+      )
+  ) %>%
+  select(
+    lc_cluster,
+    cluster_weight_raw,
+    cluster_weight
+  )
+
+cluster_weight_table
+
+bird_fuzzy_data <- bird_fuzzy_data %>%
+  select(
+    -any_of(
+      c(
+        "cluster_weight_raw",
+        "cluster_weight"
+      )
+    )
+  ) %>%
+  left_join(
+    cluster_weight_table,
+    by = "lc_cluster"
+  )
+
+bird_fuzzy_data$cluster_weight[
+  is.na(bird_fuzzy_data$cluster_weight)
+] <- 0
+
+# Sensitivity test for patch and boundary adjustment
+patch_alpha_values <- c(
+  0,
+  0.02,
+  0.05,
+  0.08,
+  0.10
+)
+
+boundary_alpha_values <- c(
+  0,
+  0.02,
+  0.05,
+  0.08,
+  0.10
+)
+
+patch_boundary_tuning_summary <- data.frame()
+
+for (patch_alpha_i in patch_alpha_values) {
+  
+  for (boundary_alpha_i in boundary_alpha_values) {
+    
+    patch_effect_i <- ifelse(
+      bird_fuzzy_data$patch_high_value == 1,
+      0.5,
+      0
+    )
+    
+    boundary_effect_i <- ifelse(
+      bird_fuzzy_data$strict_rook_interior,
+      0.5,
+      -0.5
+    )
+    
+    # Signed by cluster contribution.
+    
+    signed_patch_effect_i <- 
+      bird_fuzzy_data$cluster_weight *
+      patch_effect_i
+    
+    signed_boundary_effect_i <- 
+      bird_fuzzy_data$cluster_weight *
+      boundary_effect_i
+    
+    score_i <- bird_fuzzy_data[[hab_var]] *
+      (
+        1 +
+          patch_alpha_i * signed_patch_effect_i +
+          boundary_alpha_i * signed_boundary_effect_i
+      )
+    
+    score_i <- pmax(
+      0,
+      pmin(
+        1,
+        score_i
+      )
+    )
+    
+    threshold_i <- quantile(
+      score_i,
+      probs = 0.80,
+      na.rm = TRUE
+    )
+    
+    habitat_i <- ifelse(
+      score_i >= threshold_i,
+      1,
+      0
+    )
+    
+    cell_share_i <- mean(
+      habitat_i == 1,
+      na.rm = TRUE
+    )
+    
+    abs_share_i <- sum(
+      bird_fuzzy_data$Abs[
+        habitat_i == 1
+      ],
+      na.rm = TRUE
+    ) /
+      sum(
+        bird_fuzzy_data$Abs,
+        na.rm = TRUE
+      )
+    
+    patch_boundary_tuning_summary <- rbind(
+      patch_boundary_tuning_summary,
+      data.frame(
+        patch_alpha = patch_alpha_i,
+        boundary_alpha = boundary_alpha_i,
+        threshold_prob = 0.80,
+        n_habitat_cells = sum(
+          habitat_i == 1,
+          na.rm = TRUE
+        ),
+        cell_share = cell_share_i,
+        Abs_share = abs_share_i,
+        Abs_enrichment = abs_share_i / cell_share_i
+      )
+    )
+  }
+}
+
+patch_boundary_tuning_summary <- patch_boundary_tuning_summary %>%
+  arrange(
+    desc(
+      Abs_enrichment
+    )
+  )
+
+patch_boundary_tuning_summary
+
+
+ggplot(
+  patch_boundary_tuning_summary,
+  aes(
+    x = patch_alpha,
+    y = Abs_enrichment,
+    colour = as.factor(boundary_alpha),
+    group = boundary_alpha
+  )
+) +
+  geom_line() +
+  geom_point(
+    size = 2
+  ) +
+  geom_hline(
+    yintercept = 1,
+    linetype = "dashed"
+  ) +
+  theme_bw() +
+  labs(
+    title = "Tuning cluster-patch and boundary adjustment",
+    x = "Patch alpha",
+    y = "Abs enrichment",
+    colour = "Boundary alpha"
+  )
+
+
+# Select these manually after inspecting the sensitivity table and plot.
+
+final_patch_alpha <- 0.08
+final_boundary_alpha <- 0.1
+
+
+selected_patch_boundary_setting <- patch_boundary_tuning_summary %>%
+  filter(
+    patch_alpha == final_patch_alpha,
+    boundary_alpha == final_boundary_alpha
+  )
+
+selected_patch_boundary_setting
+
+
+# Patch-level effect:
+# High-value cluster patch strengthens all cells in the patch.
+
+bird_fuzzy_data$patch_high_value_effect <- ifelse(
+  bird_fuzzy_data$patch_high_value == 1,
+  0.5,
+  0
+)
+
+
+# Boundary effect:
+# Interior = +0.5
+# Boundary = -0.5
+
+bird_fuzzy_data$edge_boundary_effect <- ifelse(
+  bird_fuzzy_data$strict_rook_interior,
+  0.5,
+  -0.5
+)
+
+
+# Signed effects:
+# Direction depends on whether the cluster contribution is positive or negative.
+
+bird_fuzzy_data$signed_patch_effect <- 
+  bird_fuzzy_data$cluster_weight *
+  bird_fuzzy_data$patch_high_value_effect
+
+bird_fuzzy_data$signed_edge_effect <- 
+  bird_fuzzy_data$cluster_weight *
+  bird_fuzzy_data$edge_boundary_effect
+
+bird_fuzzy_data$signed_patch_effect[
+  is.na(bird_fuzzy_data$signed_patch_effect)
+] <- 0
+
+bird_fuzzy_data$signed_edge_effect[
+  is.na(bird_fuzzy_data$signed_edge_effect)
+] <- 0
+
+
+# Final combined adjustment factor.
+
+bird_fuzzy_data$combined_adjustment <- 
+  final_patch_alpha * bird_fuzzy_data$signed_patch_effect +
+  final_boundary_alpha * bird_fuzzy_data$signed_edge_effect
 
 bird_fuzzy_data$habitat_score_context <- 
-  bird_fuzzy_data[[hab_var]] +
-  alpha * bird_fuzzy_data$neighbour_effect
+  bird_fuzzy_data[[hab_var]] *
+  (
+    1 + bird_fuzzy_data$combined_adjustment
+  )
 
-
-# Keep final score between 0 and 1
 bird_fuzzy_data$habitat_score_context <- pmax(
   0,
   pmin(
@@ -733,52 +1240,102 @@ bird_fuzzy_data$habitat_score_context <- pmax(
   )
 )
 
-# Compare original and context-adjusted habitat scores
+# Classify and check final adjustment
+
+bird_fuzzy_data$edge_boundary_type <- ifelse(
+  bird_fuzzy_data$strict_rook_interior,
+  "Interior",
+  "Boundary"
+)
+
+bird_fuzzy_data$edge_boundary_type <- as.factor(
+  bird_fuzzy_data$edge_boundary_type
+)
+
+bird_fuzzy_data$patch_value_type <- ifelse(
+  bird_fuzzy_data$patch_high_value == 1,
+  "High-value cluster patch",
+  "Other cluster patch"
+)
+
+bird_fuzzy_data$patch_value_type <- as.factor(
+  bird_fuzzy_data$patch_value_type
+)
+
+bird_fuzzy_data$combined_adjustment_type <- ifelse(
+  bird_fuzzy_data$combined_adjustment > 0,
+  "Strengthened",
+  ifelse(
+    bird_fuzzy_data$combined_adjustment < 0,
+    "Weakened",
+    "Neutral"
+  )
+)
+
+bird_fuzzy_data$combined_adjustment_type <- as.factor(
+  bird_fuzzy_data$combined_adjustment_type
+)
 
 summary(
   bird_fuzzy_data[, c(
     "habitat_score",
-    "neighbour_habitat_mean",
-    "neighbour_effect",
-    "habitat_score_context"
+    "habitat_score_context",
+    "lc_cluster",
+    "cluster_patch_id",
+    "patch_n_cells",
+    "patch_max_habitat_score",
+    "patch_high_value",
+    "cluster_weight",
+    "strict_rook_interior",
+    "signed_patch_effect",
+    "signed_edge_effect",
+    "combined_adjustment"
   )]
 )
 
-# Map neighbourhood effect
-
-par(mfrow = c(1, 4))
-
-plot(
-  bird_fuzzy_data["habitat_score"],
-  main = "Original habitat score"
+table(
+  bird_fuzzy_data$edge_boundary_type
 )
 
-plot(
-  bird_fuzzy_data["neighbour_habitat_mean"],
-  main = "Neighbour mean score"
+table(
+  bird_fuzzy_data$patch_value_type
 )
 
-plot(
-  bird_fuzzy_data["neighbour_effect"],
-  main = "Neighbour effect"
+table(
+  bird_fuzzy_data$combined_adjustment_type
 )
 
-plot(
-  bird_fuzzy_data["habitat_score_context"],
-  main = "Context-adjusted score"
-)
 
-par(mfrow = c(1, 1))
+ggplot(
+  st_drop_geometry(bird_fuzzy_data),
+  aes(
+    x = habitat_score,
+    y = habitat_score_context,
+    colour = combined_adjustment_type
+  )
+) +
+  geom_point(
+    size = 2,
+    alpha = 0.8
+  ) +
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    linetype = "dashed"
+  ) +
+  theme_bw() +
+  labs(
+    title = "Cluster-patch-level habitat adjustment",
+    x = "Original habitat score",
+    y = "Patch-adjusted habitat score",
+    colour = "Adjustment"
+  )
 
-# Map neighbourhood effect type
-plot(
-  bird_fuzzy_data["neighbour_effect_type"],
-  main = "Neighbourhood effect type"
-)
 
 # =========================================================
-# 12 Define potential habitat cells
+# 12. Define potential habitat cells
 # =========================================================
+
 # Threshold sensitivity test
 
 threshold_probs <- c(
@@ -801,17 +1358,21 @@ for (p in threshold_probs) {
   
   habitat_i <- ifelse(
     bird_fuzzy_data$habitat_score_context >= threshold_i,
-    1,
-    0
-  )
+    1,0)
   
   threshold_summary <- rbind(
     threshold_summary,
     data.frame(
       threshold_prob = p,
       threshold_value = as.numeric(threshold_i),
-      n_habitat_cells = sum(habitat_i == 1, na.rm = TRUE),
-      prop_habitat_cells = mean(habitat_i == 1, na.rm = TRUE)
+      n_habitat_cells = sum(
+        habitat_i == 1,
+        na.rm = TRUE
+      ),
+      prop_habitat_cells = mean(
+        habitat_i == 1,
+        na.rm = TRUE
+      )
     )
   )
 }
@@ -820,10 +1381,7 @@ threshold_summary
 
 # Choose main habitat threshold
 
-# Use the top 30% of context-adjusted habitat scores as potential habitat.
-# This corresponds to the 0.70 quantile threshold.
-
-hab_threshold_prob <- 0.80
+hab_threshold_prob <- 0.8
 
 hab_threshold <- quantile(
   bird_fuzzy_data$habitat_score_context,
@@ -853,11 +1411,13 @@ plot(
 )
 
 # =========================================================
-# 13.Select potential habitat cells
+# 13. Select potential habitat cells and create patches
 # =========================================================
 
 hab_cells <- bird_fuzzy_data %>%
-  filter(potential_habitat == 1)
+  filter(
+    potential_habitat == 1
+  )
 
 if (nrow(hab_cells) == 0) {
   
@@ -873,26 +1433,28 @@ if (nrow(hab_cells) == 1) {
   
 } else {
   
-  # Find touching habitat cells
-  touch_list_hab <- st_touches(hab_cells)
+  touch_list_hab <- st_touches(
+    hab_cells
+  )
   
-  # Build graph from touching relationships
   hab_graph <- graph_from_adj_list(
     touch_list_hab,
     mode = "all"
   )
   
-  # Find connected components
-  hab_comp <- components(hab_graph)
+  hab_comp <- components(
+    hab_graph
+  )
   
-  # Add patch ID
   hab_cells$patch_id <- hab_comp$membership
 }
 
 # Dissolve cells into habitat patches
 
 hab_patches <- hab_cells %>%
-  group_by(patch_id) %>%
+  group_by(
+    patch_id
+  ) %>%
   summarise(
     n_cells = n(),
     mean_habitat_score = mean(
@@ -903,40 +1465,61 @@ hab_patches <- hab_cells %>%
       habitat_score_context,
       na.rm = TRUE
     ),
-    mean_neighbour_effect = mean(
-      neighbour_effect,
+    mean_edge_boundary_effect = mean(
+      edge_boundary_effect,
+      na.rm = TRUE
+    ),
+    mean_signed_edge_effect = mean(
+      signed_edge_effect,
       na.rm = TRUE
     ),
     .groups = "drop"
   )
 
+
 # Calculate patch-level metrics
 
 hab_patches$patch_area_m2 <- as.numeric(
-  st_area(hab_patches)
-)
-
-hab_patches$patch_area_km2 <- hab_patches$patch_area_m2 / 1e6
-
-hab_patches$patch_perimeter_m <- as.numeric(
-  st_length(
-    st_boundary(hab_patches)
+  st_area(
+    hab_patches
   )
 )
 
-hab_patches$patch_perimeter_km <- hab_patches$patch_perimeter_m / 1000
+hab_patches$patch_area_km2 <- 
+  hab_patches$patch_area_m2 / 1e6
 
-# Shape complexity:
+hab_patches$patch_perimeter_m <- as.numeric(
+  st_length(
+    st_boundary(
+      hab_patches
+    )
+  )
+)
+
+hab_patches$patch_perimeter_km <- 
+  hab_patches$patch_perimeter_m / 1000
+
+
+# Shape complexity
 
 hab_patches$shape_complexity <- 
   hab_patches$patch_perimeter_km /
-  (2 * sqrt(pi * hab_patches$patch_area_km2))
+  (
+    2 * sqrt(
+      pi * hab_patches$patch_area_km2
+    )
+  )
+
 
 # Summarise habitat patch structure
 
 patch_summary <- data.frame(
-  n_habitat_cells = nrow(hab_cells),
-  n_patches = nrow(hab_patches),
+  n_habitat_cells = nrow(
+    hab_cells
+  ),
+  n_patches = nrow(
+    hab_patches
+  ),
   total_habitat_area_km2 = sum(
     hab_patches$patch_area_km2,
     na.rm = TRUE
@@ -951,6 +1534,14 @@ patch_summary <- data.frame(
   ),
   mean_patch_score = mean(
     hab_patches$mean_habitat_score,
+    na.rm = TRUE
+  ),
+  mean_patch_edge_effect = mean(
+    hab_patches$mean_edge_boundary_effect,
+    na.rm = TRUE
+  ),
+  mean_patch_signed_effect = mean(
+    hab_patches$mean_signed_edge_effect,
     na.rm = TRUE
   )
 )
@@ -970,17 +1561,24 @@ plot(
   main = "Mean habitat score by patch"
 )
 
+
 # Check largest patches
 
 largest_patches <- hab_patches %>%
   st_drop_geometry() %>%
-  arrange(desc(patch_area_km2)) %>%
+  arrange(
+    desc(
+      patch_area_km2
+    )
+  ) %>%
   select(
     patch_id,
     n_cells,
     patch_area_km2,
     mean_habitat_score,
     max_habitat_score,
+    mean_edge_boundary_effect,
+    mean_signed_edge_effect,
     shape_complexity
   )
 
@@ -992,19 +1590,31 @@ largest_patches
 # =========================================================
 
 # Calculate Abs captured by potential habitat cells
-
 abs_capture_summary <- bird_fuzzy_data %>%
   st_drop_geometry() %>%
-  group_by(potential_habitat) %>%
+  group_by(
+    potential_habitat
+  ) %>%
   summarise(
     n_cells = n(),
-    total_Abs = sum(Abs, na.rm = TRUE),
-    mean_Abs = mean(Abs, na.rm = TRUE),
-    median_Abs = median(Abs, na.rm = TRUE),
+    total_Abs = sum(
+      Abs,
+      na.rm = TRUE
+    ),
+    mean_Abs = mean(
+      Abs,
+      na.rm = TRUE
+    ),
+    median_Abs = median(
+      Abs,
+      na.rm = TRUE
+    ),
     .groups = "drop"
   )
 
-abs_capture_summary$total_cells <- sum(abs_capture_summary$n_cells)
+abs_capture_summary$total_cells <- sum(
+  abs_capture_summary$n_cells
+)
 
 abs_capture_summary$total_Abs_all <- sum(
   abs_capture_summary$total_Abs,
@@ -1012,20 +1622,25 @@ abs_capture_summary$total_Abs_all <- sum(
 )
 
 abs_capture_summary$cell_share <- 
-  abs_capture_summary$n_cells / abs_capture_summary$total_cells
+  abs_capture_summary$n_cells /
+  abs_capture_summary$total_cells
 
 abs_capture_summary$Abs_share <- 
-  abs_capture_summary$total_Abs / abs_capture_summary$total_Abs_all
+  abs_capture_summary$total_Abs /
+  abs_capture_summary$total_Abs_all
 
 abs_capture_summary$Abs_enrichment <- 
-  abs_capture_summary$Abs_share / abs_capture_summary$cell_share
+  abs_capture_summary$Abs_share /
+  abs_capture_summary$cell_share
 
 abs_capture_summary
 
-# Plot cell share vs Abs share
 
+# Plot cell share vs Abs share
 abs_capture_plot <- abs_capture_summary %>%
-  filter(potential_habitat == 1)
+  filter(
+    potential_habitat == 1
+  )
 
 capture_compare <- data.frame(
   metric = c(
@@ -1040,11 +1655,7 @@ capture_compare <- data.frame(
 
 ggplot(
   capture_compare,
-  aes(
-    x = metric,
-    y = value
-  )
-) +
+  aes( x = metric, y = value )) +
   geom_col() +
   theme_bw() +
   labs(
@@ -1052,3 +1663,18 @@ ggplot(
     x = "",
     y = "Proportion"
   )
+
+boundary_response_summary <- bird_fuzzy_data %>%
+  st_drop_geometry() %>%
+  group_by(edge_boundary_type) %>%
+  summarise(
+    n_cells = n(),
+    mean_SR = mean(SR, na.rm = TRUE),
+    mean_Abs = mean(Abs, na.rm = TRUE),
+    median_Abs = median(Abs, na.rm = TRUE),
+    mean_habitat_score = mean(habitat_score, na.rm = TRUE),
+    mean_habitat_score_context = mean(habitat_score_context, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+boundary_response_summary
