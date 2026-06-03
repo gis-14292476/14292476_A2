@@ -8,7 +8,7 @@ library(sf)
 library(terra)
 library(dplyr)
 library(tidyr)
-
+library(ggplot2)
 # =========================================================
 # 1. Read and preprocess spatial data
 # =========================================================
@@ -298,155 +298,447 @@ bird_fuzzy_data$Abs_log <- log1p(bird_fuzzy_data$Abs)
 
 bird_fuzzy_data$Abs_log_z <- as.numeric(scale(bird_fuzzy_data$Abs_log))
 
-# =========================================================
-# 10. Estimate cluster contribution from bird responses
-# =========================================================
+# Spatial block validation and stable cluster contribution
+
+# Create six spatial blocks
+
+cell_xy <- st_coordinates(
+  st_centroid(bird_fuzzy_data)
+)
+
+bird_fuzzy_data$cell_x <- cell_xy[, 1]
+bird_fuzzy_data$cell_y <- cell_xy[, 2]
+
+bird_fuzzy_data$x_block <- cut(
+  bird_fuzzy_data$cell_x,
+  breaks = quantile(
+    bird_fuzzy_data$cell_x,
+    probs = seq(0, 1, length.out = 4),
+    na.rm = TRUE
+  ),
+  include.lowest = TRUE,
+  labels = c("X1", "X2", "X3")
+)
+
+bird_fuzzy_data$y_block <- cut(
+  bird_fuzzy_data$cell_y,
+  breaks = quantile(
+    bird_fuzzy_data$cell_y,
+    probs = seq(0, 1, length.out = 3),
+    na.rm = TRUE
+  ),
+  include.lowest = TRUE,
+  labels = c("Y1", "Y2")
+)
+
+bird_fuzzy_data$spatial_block <- interaction(
+  bird_fuzzy_data$x_block,
+  bird_fuzzy_data$y_block,
+  drop = TRUE
+)
+
+bird_fuzzy_data$spatial_block <- as.factor(
+)
+
+table(bird_fuzzy_data$spatial_block)
+
+plot(
+  bird_fuzzy_data["spatial_block"],
+  main = "Six spatial blocks for validation"
+)
+
+# Prepare model variables
+
+bird_fuzzy_data$SR <- as.numeric(bird_fuzzy_data$SR)
+bird_fuzzy_data$Abs <- as.numeric(bird_fuzzy_data$Abs)
+bird_fuzzy_data$Abs_log <- log1p(bird_fuzzy_data$Abs)
+
 mem_cols <- paste0("mem_cluster_", 1:best_k)
 
-sr_formula <- as.formula(
-  paste(
-    "SR_z ~ 0 +",
-    paste(mem_cols, collapse = " + ")
+for (col in mem_cols) {
+  bird_fuzzy_data[[col]] <- as.numeric(
+    as.character(bird_fuzzy_data[[col]])
   )
+}
+
+all_blocks <- levels(bird_fuzzy_data$spatial_block)
+
+train_block_combinations <- combn(
+  all_blocks,
+  4,
+  simplify = FALSE
 )
 
-sr_cluster_model <- lm(
-  sr_formula,
-  data = bird_fuzzy_data
-)
+length(train_block_combinations)  # should be 15
 
-summary(sr_cluster_model)
+# Helper functions
 
+rmse <- function(obs, pred) {
+  sqrt(mean((obs - pred)^2, na.rm = TRUE))
+}
 
-# Model cluster contribution to Abs
+r2_pred <- function(obs, pred) {
+  1 - sum((obs - pred)^2, na.rm = TRUE) /
+    sum((obs - mean(obs, na.rm = TRUE))^2, na.rm = TRUE)
+}
 
-abs_formula <- as.formula(
-  paste(
-    "Abs_log_z ~ 0 +",
-    paste(mem_cols, collapse = " + ")
+standardise_by_train <- function(x, train_index) {
+  (x - mean(x[train_index], na.rm = TRUE)) /
+    sd(x[train_index], na.rm = TRUE)
+}
+
+# Exhaustive spatial block validation
+
+coef_results <- data.frame()
+validation_results <- data.frame()
+
+for (i in seq_along(train_block_combinations)) {
+  
+  train_blocks_i <- train_block_combinations[[i]]
+  test_blocks_i  <- setdiff(all_blocks, train_blocks_i)
+  
+  data_i <- bird_fuzzy_data
+  
+  data_i$split_i <- ifelse(
+    data_i$spatial_block %in% train_blocks_i,
+    "Train",
+    "Test"
   )
-)
+  
+  train_index <- data_i$split_i == "Train"
+  test_index  <- data_i$split_i == "Test"
+  
+  # Standardise responses using training blocks only
+  data_i$SR_z_i <- standardise_by_train(
+    data_i$SR,
+    train_index
+  )
+  
+  data_i$Abs_log_z_i <- standardise_by_train(
+    data_i$Abs_log,
+    train_index
+  )
+  
+  train_i <- data_i[train_index, ]
+  test_i  <- data_i[test_index, ]
+  
+  # Build models
+  sr_formula_i <- as.formula(
+    paste(
+      "SR_z_i ~ 0 +",
+      paste(mem_cols, collapse = " + ")
+    )
+  )
+  
+  abs_formula_i <- as.formula(
+    paste(
+      "Abs_log_z_i ~ 0 +",
+      paste(mem_cols, collapse = " + ")
+    )
+  )
+  
+  sr_model_i <- lm(
+    sr_formula_i,
+    data = train_i
+  )
+  
+  abs_model_i <- lm(
+    abs_formula_i,
+    data = train_i
+  )
+  
+  # Predict
+  train_i$SR_pred_i  <- predict(sr_model_i, newdata = train_i)
+  test_i$SR_pred_i   <- predict(sr_model_i, newdata = test_i)
+  train_i$Abs_pred_i <- predict(abs_model_i, newdata = train_i)
+  test_i$Abs_pred_i  <- predict(abs_model_i, newdata = test_i)
+  
+  # Store validation results
+  validation_results <- rbind(
+    validation_results,
+    data.frame(
+      split_id = i,
+      response = c("SR", "SR", "Abs", "Abs"),
+      dataset = c("Train", "Test", "Train", "Test"),
+      RMSE = c(
+        rmse(train_i$SR_z_i, train_i$SR_pred_i),
+        rmse(test_i$SR_z_i, test_i$SR_pred_i),
+        rmse(train_i$Abs_log_z_i, train_i$Abs_pred_i),
+        rmse(test_i$Abs_log_z_i, test_i$Abs_pred_i)
+      ),
+      pred_R2 = c(
+        r2_pred(train_i$SR_z_i, train_i$SR_pred_i),
+        r2_pred(test_i$SR_z_i, test_i$SR_pred_i),
+        r2_pred(train_i$Abs_log_z_i, train_i$Abs_pred_i),
+        r2_pred(test_i$Abs_log_z_i, test_i$Abs_pred_i)
+      ),
+      train_blocks = paste(train_blocks_i, collapse = " + "),
+      test_blocks = paste(test_blocks_i, collapse = " + ")
+    )
+  )
+  
+  # Store contribution coefficients
+  coef_results <- rbind(
+    coef_results,
+    data.frame(
+      split_id = i,
+      response = "SR",
+      cluster = names(coef(sr_model_i)),
+      coefficient = as.numeric(coef(sr_model_i)),
+      train_blocks = paste(train_blocks_i, collapse = " + "),
+      test_blocks = paste(test_blocks_i, collapse = " + ")
+    ),
+    data.frame(
+      split_id = i,
+      response = "Abs",
+      cluster = names(coef(abs_model_i)),
+      coefficient = as.numeric(coef(abs_model_i)),
+      train_blocks = paste(train_blocks_i, collapse = " + "),
+      test_blocks = paste(test_blocks_i, collapse = " + ")
+    )
+  )
+}
 
-abs_cluster_model <- lm(
-  abs_formula,
-  data = bird_fuzzy_data
-)
+# Summarise coefficient stability
 
-summary(abs_cluster_model)
+coef_stability <- coef_results %>%
+  group_by(response, cluster) %>%
+  summarise(
+    mean_coef = mean(coefficient, na.rm = TRUE),
+    sd_coef = sd(coefficient, na.rm = TRUE),
+    min_coef = min(coefficient, na.rm = TRUE),
+    max_coef = max(coefficient, na.rm = TRUE),
+    positive_rate = mean(coefficient > 0, na.rm = TRUE),
+    negative_rate = mean(coefficient < 0, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(
+    response,
+    desc(mean_coef)
+  )
 
-# Summarise cluster contribution
+coef_stability
 
-sr_contribution <- data.frame(
-  lc_cluster = 1:best_k,
-  SR_contribution = coef(sr_cluster_model)
-)
+# Summarise validation performance
 
-abs_contribution <- data.frame(
-  lc_cluster = 1:best_k,
-  Abs_contribution = coef(abs_cluster_model)
-)
+validation_summary <- validation_results %>%
+  group_by(response, dataset) %>%
+  summarise(
+    mean_RMSE = mean(RMSE, na.rm = TRUE),
+    sd_RMSE = sd(RMSE, na.rm = TRUE),
+    mean_pred_R2 = mean(pred_R2, na.rm = TRUE),
+    sd_pred_R2 = sd(pred_R2, na.rm = TRUE),
+    min_pred_R2 = min(pred_R2, na.rm = TRUE),
+    max_pred_R2 = max(pred_R2, na.rm = TRUE),
+    .groups = "drop"
+  )
 
-cluster_contribution <- merge(
-  sr_contribution,
-  abs_contribution,
-  by = "lc_cluster"
-)
+validation_summary
 
-cluster_contribution
 
-mem_cols <- paste0("mem_cluster_", 1:best_k)
-mem_cols %in% names(bird_fuzzy_data)
+# Plot coefficient stability
 
-# =========================================================
-# 11. Calculate habitat suitability score
-# =========================================================
-# Extract membership columns and drop geometry
+ggplot(
+  coef_results,
+  aes(
+    x = cluster,
+    y = coefficient
+  )
+) +
+  geom_boxplot() +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  facet_wrap(~ response) +
+  theme_bw() +
+  labs(
+    title = "Stability of cluster contribution coefficients",
+    x = "Fuzzy land-cover cluster",
+    y = "Coefficient"
+  )
+
+# Plot validation performance
+
+ggplot(
+  validation_results,
+  aes(
+    x = dataset,
+    y = pred_R2
+  )
+) +
+  geom_boxplot() +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  facet_wrap(~ response) +
+  theme_bw() +
+  labs(
+    title = "Spatial block validation performance",
+    x = "Dataset",
+    y = "Predictive R-squared"
+  )
+
+# Calculate habitat score using stable SR coefficients
+
+stable_SR_coef <- coef_stability %>%
+  filter(response == "SR") %>%
+  mutate(
+    cluster_number = as.numeric(
+      gsub("mem_cluster_", "", cluster)
+    )
+  ) %>%
+  arrange(cluster_number)
+
+stable_SR_coef
+
+sr_coef <- stable_SR_coef$mean_coef
+
 membership_df <- st_drop_geometry(
   bird_fuzzy_data[, mem_cols]
 )
-# Convert all membership columns to numeric
+
 membership_df[] <- lapply(
   membership_df,
   function(x) as.numeric(as.character(x))
 )
 
-# Convert to numeric matrix
 membership_mat <- as.matrix(membership_df)
 
-# Make sure contribution values are ordered correctly
-cluster_contribution <- cluster_contribution[
-  order(cluster_contribution$lc_cluster),
-]
-
-sr_coef <- cluster_contribution$SR_contribution
-abs_coef <- cluster_contribution$Abs_contribution
-
-# =========================================================
-# Calculate SR-based habitat score
-bird_fuzzy_data$habitat_SR <- as.numeric(
+bird_fuzzy_data$habitat_SR_raw <- as.numeric(
   membership_mat %*% sr_coef
 )
-# Calculate Abs-based habitat score
-bird_fuzzy_data$habitat_Abs <- as.numeric(
-  membership_mat %*% abs_coef
-)
 
-# Standardise habitat scores to 0-1
-bird_fuzzy_data$habitat_SR_01 <- (
-  bird_fuzzy_data$habitat_SR -
-    min(bird_fuzzy_data$habitat_SR, na.rm = TRUE)
-) / (
-  max(bird_fuzzy_data$habitat_SR, na.rm = TRUE) -
-    min(bird_fuzzy_data$habitat_SR, na.rm = TRUE)
-)
-
-bird_fuzzy_data$habitat_Abs_01 <- (
-  bird_fuzzy_data$habitat_Abs -
-    min(bird_fuzzy_data$habitat_Abs, na.rm = TRUE)
-) / (
-  max(bird_fuzzy_data$habitat_Abs, na.rm = TRUE) -
-    min(bird_fuzzy_data$habitat_Abs, na.rm = TRUE)
-)
-
-
-# Calculate combined habitat score
 bird_fuzzy_data$habitat_score <- (
-  bird_fuzzy_data$habitat_SR_01 *
-    bird_fuzzy_data$habitat_Abs_01
-) 
-
-
-# Plot habitat scores
-
-par(mfrow = c(1, 3))
-
-plot(
-  bird_fuzzy_data["habitat_SR_01"],
-  main = "SR-based habitat score"
+  bird_fuzzy_data$habitat_SR_raw -
+    min(bird_fuzzy_data$habitat_SR_raw, na.rm = TRUE)
+) / (
+  max(bird_fuzzy_data$habitat_SR_raw, na.rm = TRUE) -
+    min(bird_fuzzy_data$habitat_SR_raw, na.rm = TRUE)
 )
 
-plot(
-  bird_fuzzy_data["habitat_Abs_01"],
-  main = "Abs-based habitat score"
-)
+# Plot stable SR contribution and habitat score
+ggplot(
+  stable_SR_coef,
+  aes(
+    x = reorder(cluster, mean_coef),
+    y = mean_coef
+  )
+) +
+  geom_col() +
+  geom_errorbar(
+    aes(
+      ymin = mean_coef - sd_coef,
+      ymax = mean_coef + sd_coef
+    ),
+    width = 0.2
+  ) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  coord_flip() +
+  theme_bw() +
+  labs(
+    title = "Stable SR contribution of fuzzy land-cover clusters",
+    x = "Fuzzy land-cover cluster",
+    y = "Mean SR contribution coefficient"
+  )
 
 plot(
   bird_fuzzy_data["habitat_score"],
-  main = "Combined habitat score"
+  main = "Habitat score based on stable SR contribution"
 )
 
-par(mfrow = c(1, 1))
-
-# Check habitat score summary
 summary(
   bird_fuzzy_data[, c(
-    "habitat_SR",
-    "habitat_Abs",
-    "habitat_SR_01",
-    "habitat_Abs_01",
+    "habitat_SR_raw",
     "habitat_score"
   )]
 )
+
+# =========================================================
+# 11. Calculate neighbourhood effect
+# 计算邻域影响
+# =========================================================
+
+# Use the habitat score calculated in Section 10
+hab_var <- "habitat_score"
+
+touch_list <- st_touches(bird_fuzzy_data)
+
+# Count number of neighbours for each cell
+bird_fuzzy_data$n_neighbours <- lengths(touch_list)
+
+# Calculate mean habitat score of neighbouring cells
+bird_fuzzy_data$neighbour_habitat_mean <- NA
+
+for (i in seq_len(nrow(bird_fuzzy_data))) {
+  
+  neigh_ids <- touch_list[[i]]
+  
+  if (length(neigh_ids) > 0) {
+    
+    bird_fuzzy_data$neighbour_habitat_mean[i] <- mean(
+      bird_fuzzy_data[[hab_var]][neigh_ids],
+      na.rm = TRUE
+    )
+    
+  }
+}
+
+# Calculate whether neighbourhood effect is positive or negative
+global_habitat_mean <- mean(
+  bird_fuzzy_data[[hab_var]],
+  na.rm = TRUE
+)
+
+bird_fuzzy_data$neighbour_effect <- 
+  bird_fuzzy_data$neighbour_habitat_mean - global_habitat_mean
+
+bird_fuzzy_data$neighbour_effect_type <- ifelse(
+  bird_fuzzy_data$neighbour_effect >= 0,
+  "Positive",
+  "Negative"
+)
+
+bird_fuzzy_data$neighbour_effect_type <- as.factor(
+  bird_fuzzy_data$neighbour_effect_type
+)
+
+# Strengthen or weaken habitat score
+alpha <- 0.3
+
+bird_fuzzy_data$habitat_score_context <- 
+  bird_fuzzy_data[[hab_var]] +
+  alpha * bird_fuzzy_data$neighbour_effect
+
+# Keep final score between 0 and 1
+bird_fuzzy_data$habitat_score_context <- pmax(
+  0,
+  pmin(1, bird_fuzzy_data$habitat_score_context)
+)
+
+# Map neighbourhood effect
+par(mfrow = c(1, 3))
+
+plot(
+  bird_fuzzy_data["neighbour_habitat_mean"],
+  main = "Mean habitat score of neighbours"
+)
+
+plot(
+  bird_fuzzy_data["neighbour_effect"],
+  main = "Neighbourhood effect"
+)
+
+plot(
+  bird_fuzzy_data["habitat_score_context"],
+  main = "Context-adjusted habitat score"
+)
+
+par(mfrow = c(1, 1))
 
 # =========================================================
 # 12. Calculate neighbourhood effect
