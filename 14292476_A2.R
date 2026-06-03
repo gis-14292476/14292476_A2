@@ -338,6 +338,7 @@ bird_fuzzy_data$spatial_block <- interaction(
 )
 
 bird_fuzzy_data$spatial_block <- as.factor(
+  bird_fuzzy_data$spatial_block
 )
 
 table(bird_fuzzy_data$spatial_block)
@@ -659,19 +660,18 @@ summary(
 )
 
 # =========================================================
-# 11. Calculate neighbourhood effect
-# 计算邻域影响
-# =========================================================
+# Calculate neighbourhood effect
 
-# Use the habitat score calculated in Section 10
 hab_var <- "habitat_score"
 
+# Find neighbouring cells
 touch_list <- st_touches(bird_fuzzy_data)
 
 # Count number of neighbours for each cell
 bird_fuzzy_data$n_neighbours <- lengths(touch_list)
 
 # Calculate mean habitat score of neighbouring cells
+
 bird_fuzzy_data$neighbour_habitat_mean <- NA
 
 for (i in seq_len(nrow(bird_fuzzy_data))) {
@@ -688,57 +688,91 @@ for (i in seq_len(nrow(bird_fuzzy_data))) {
   }
 }
 
-# Calculate whether neighbourhood effect is positive or negative
-global_habitat_mean <- mean(
-  bird_fuzzy_data[[hab_var]],
-  na.rm = TRUE
-)
+# Calculate relative neighbourhood effect
+# Positive value:
+# neighbouring cells are better than the focal cell
+
+# Negative value:
+# neighbouring cells are worse than the focal cell
 
 bird_fuzzy_data$neighbour_effect <- 
-  bird_fuzzy_data$neighbour_habitat_mean - global_habitat_mean
+  bird_fuzzy_data$neighbour_habitat_mean -
+  bird_fuzzy_data[[hab_var]]
+
 
 bird_fuzzy_data$neighbour_effect_type <- ifelse(
-  bird_fuzzy_data$neighbour_effect >= 0,
+  bird_fuzzy_data$neighbour_effect > 0,
   "Positive",
-  "Negative"
+  ifelse(
+    bird_fuzzy_data$neighbour_effect < 0,
+    "Negative",
+    "Neutral"
+  )
 )
 
 bird_fuzzy_data$neighbour_effect_type <- as.factor(
   bird_fuzzy_data$neighbour_effect_type
 )
 
-# Strengthen or weaken habitat score
+# 11.4 Adjust habitat score using neighbourhood effect
 alpha <- 0.3
 
 bird_fuzzy_data$habitat_score_context <- 
   bird_fuzzy_data[[hab_var]] +
   alpha * bird_fuzzy_data$neighbour_effect
 
+
 # Keep final score between 0 and 1
 bird_fuzzy_data$habitat_score_context <- pmax(
   0,
-  pmin(1, bird_fuzzy_data$habitat_score_context)
+  pmin(
+    1,
+    bird_fuzzy_data$habitat_score_context
+  )
+)
+
+# Compare original and context-adjusted habitat scores
+
+summary(
+  bird_fuzzy_data[, c(
+    "habitat_score",
+    "neighbour_habitat_mean",
+    "neighbour_effect",
+    "habitat_score_context"
+  )]
 )
 
 # Map neighbourhood effect
-par(mfrow = c(1, 3))
+
+par(mfrow = c(1, 4))
+
+plot(
+  bird_fuzzy_data["habitat_score"],
+  main = "Original habitat score"
+)
 
 plot(
   bird_fuzzy_data["neighbour_habitat_mean"],
-  main = "Mean habitat score of neighbours"
+  main = "Neighbour mean score"
 )
 
 plot(
   bird_fuzzy_data["neighbour_effect"],
-  main = "Neighbourhood effect"
+  main = "Neighbour effect"
 )
 
 plot(
   bird_fuzzy_data["habitat_score_context"],
-  main = "Context-adjusted habitat score"
+  main = "Context-adjusted score"
 )
 
 par(mfrow = c(1, 1))
+
+# Map neighbourhood effect type
+plot(
+  bird_fuzzy_data["neighbour_effect_type"],
+  main = "Neighbourhood effect type"
+)
 
 # =========================================================
 # 12. Calculate neighbourhood effect
