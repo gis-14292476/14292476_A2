@@ -660,7 +660,8 @@ summary(
 )
 
 # =========================================================
-# Calculate neighbourhood effect
+# 11.Calculate neighbourhood effect
+# =========================================================
 
 hab_var <- "habitat_score"
 
@@ -714,7 +715,7 @@ bird_fuzzy_data$neighbour_effect_type <- as.factor(
   bird_fuzzy_data$neighbour_effect_type
 )
 
-# 11.4 Adjust habitat score using neighbourhood effect
+# Adjust habitat score using neighbourhood effect
 alpha <- 0.3
 
 bird_fuzzy_data$habitat_score_context <- 
@@ -775,89 +776,80 @@ plot(
 )
 
 # =========================================================
-# 12. Calculate neighbourhood effect
+# 12 Define potential habitat cells
 # =========================================================
-hab_var <- "habitat_score"
+# Threshold sensitivity test
 
-touch_list <- st_touches(bird_fuzzy_data)
+threshold_probs <- c(
+  0.50,
+  0.60,
+  0.70,
+  0.80,
+  0.90
+)
 
-# Count number of neighbours for each cell
-bird_fuzzy_data$n_neighbours <- lengths(touch_list)
+threshold_summary <- data.frame()
 
-# Calculate mean habitat score of neighbouring cells
-
-bird_fuzzy_data$neighbour_habitat_mean <- NA
-
-for (i in seq_len(nrow(bird_fuzzy_data))) {
+for (p in threshold_probs) {
   
-  neigh_ids <- touch_list[[i]]
+  threshold_i <- quantile(
+    bird_fuzzy_data$habitat_score_context,
+    probs = p,
+    na.rm = TRUE
+  )
   
-  if (length(neigh_ids) > 0) {
-    
-    bird_fuzzy_data$neighbour_habitat_mean[i] <- mean(
-      bird_fuzzy_data[[hab_var]][neigh_ids],
-      na.rm = TRUE
+  habitat_i <- ifelse(
+    bird_fuzzy_data$habitat_score_context >= threshold_i,
+    1,
+    0
+  )
+  
+  threshold_summary <- rbind(
+    threshold_summary,
+    data.frame(
+      threshold_prob = p,
+      threshold_value = as.numeric(threshold_i),
+      n_habitat_cells = sum(habitat_i == 1, na.rm = TRUE),
+      prop_habitat_cells = mean(habitat_i == 1, na.rm = TRUE)
     )
-    
-  }
+  )
 }
 
-# Calculate whether neighbourhood effect is positive or negative
+threshold_summary
 
-global_habitat_mean <- mean(
-  bird_fuzzy_data[[hab_var]],
+# Choose main habitat threshold
+
+# Use the top 30% of context-adjusted habitat scores as potential habitat.
+# This corresponds to the 0.70 quantile threshold.
+
+hab_threshold_prob <- 0.70
+
+hab_threshold <- quantile(
+  bird_fuzzy_data$habitat_score_context,
+  probs = hab_threshold_prob,
   na.rm = TRUE
 )
 
-bird_fuzzy_data$neighbour_effect <- 
-  bird_fuzzy_data$neighbour_habitat_mean - global_habitat_mean
+hab_threshold
 
-bird_fuzzy_data$neighbour_effect_type <- ifelse(
-  bird_fuzzy_data$neighbour_effect >= 0,
-  "Positive",
-  "Negative"
+# Define potential habitat cells
+
+bird_fuzzy_data$potential_habitat <- ifelse(
+  bird_fuzzy_data$habitat_score_context >= hab_threshold,
+  1,
+  0
 )
 
-bird_fuzzy_data$neighbour_effect_type <- as.factor(
-  bird_fuzzy_data$neighbour_effect_type
+bird_fuzzy_data$potential_habitat <- as.factor(
+  bird_fuzzy_data$potential_habitat
 )
 
-# Strengthen or weaken habitat score
-
-alpha <- 0.3
-
-bird_fuzzy_data$habitat_score_context <- 
-  bird_fuzzy_data[[hab_var]] +
-  alpha * bird_fuzzy_data$neighbour_effect
-
-# Keep final score between 0 and 1
-bird_fuzzy_data$habitat_score_context <- pmax(
-  0,
-  pmin(1, bird_fuzzy_data$habitat_score_context)
-)
-
-
-# Map neighbourhood effect
-
-par(mfrow = c(1, 3))
+# Plot potential habitat cells
 
 plot(
-  bird_fuzzy_data["neighbour_habitat_mean"],
-  main = "Mean habitat score of 8 neighbours"
+  bird_fuzzy_data["potential_habitat"],
+  main = "Potential habitat cells"
 )
-
-plot(
-  bird_fuzzy_data["neighbour_effect"],
-  main = "Neighbourhood effect"
-)
-
-plot(
-  bird_fuzzy_data["habitat_score_context"],
-  main = "Context-adjusted habitat score"
-)
-
-par(mfrow = c(1, 1))
-
 # =========================================================
 # 13. Define potential habitat cells
 # =========================================================
