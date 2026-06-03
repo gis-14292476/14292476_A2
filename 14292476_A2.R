@@ -9,6 +9,7 @@ library(terra)
 library(dplyr)
 library(tidyr)
 library(ggplot2)
+library(igraph)
 # =========================================================
 # 1. Read and preprocess spatial data
 # =========================================================
@@ -822,7 +823,7 @@ threshold_summary
 # Use the top 30% of context-adjusted habitat scores as potential habitat.
 # This corresponds to the 0.70 quantile threshold.
 
-hab_threshold_prob <- 0.70
+hab_threshold_prob <- 0.80
 
 hab_threshold <- quantile(
   bird_fuzzy_data$habitat_score_context,
@@ -850,27 +851,204 @@ plot(
   bird_fuzzy_data["potential_habitat"],
   main = "Potential habitat cells"
 )
+
 # =========================================================
-# 13. Define potential habitat cells
+# 13.Select potential habitat cells
 # =========================================================
-hab_threshold <- quantile(
-  bird_fuzzy_data$habitat_score_context,
-  probs = 0.70,
-  na.rm = TRUE
+
+hab_cells <- bird_fuzzy_data %>%
+  filter(potential_habitat == 1)
+
+if (nrow(hab_cells) == 0) {
+  
+  stop("No habitat cells found. Try a lower threshold.")
+  
+}
+
+# Identify connected habitat patches
+
+if (nrow(hab_cells) == 1) {
+  
+  hab_cells$patch_id <- 1
+  
+} else {
+  
+  # Find touching habitat cells
+  touch_list_hab <- st_touches(hab_cells)
+  
+  # Build graph from touching relationships
+  hab_graph <- graph_from_adj_list(
+    touch_list_hab,
+    mode = "all"
+  )
+  
+  # Find connected components
+  hab_comp <- components(hab_graph)
+  
+  # Add patch ID
+  hab_cells$patch_id <- hab_comp$membership
+}
+
+# Dissolve cells into habitat patches
+
+hab_patches <- hab_cells %>%
+  group_by(patch_id) %>%
+  summarise(
+    n_cells = n(),
+    mean_habitat_score = mean(
+      habitat_score_context,
+      na.rm = TRUE
+    ),
+    max_habitat_score = max(
+      habitat_score_context,
+      na.rm = TRUE
+    ),
+    mean_neighbour_effect = mean(
+      neighbour_effect,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+# Calculate patch-level metrics
+
+hab_patches$patch_area_m2 <- as.numeric(
+  st_area(hab_patches)
 )
 
-hab_threshold
+hab_patches$patch_area_km2 <- hab_patches$patch_area_m2 / 1e6
 
-bird_fuzzy_data$potential_habitat <- ifelse(
-  bird_fuzzy_data$habitat_score_context >= hab_threshold,
-  1,0
+hab_patches$patch_perimeter_m <- as.numeric(
+  st_length(
+    st_boundary(hab_patches)
+  )
 )
 
-bird_fuzzy_data$potential_habitat <- as.factor(
-  bird_fuzzy_data$potential_habitat
+hab_patches$patch_perimeter_km <- hab_patches$patch_perimeter_m / 1000
+
+# Shape complexity:
+
+hab_patches$shape_complexity <- 
+  hab_patches$patch_perimeter_km /
+  (2 * sqrt(pi * hab_patches$patch_area_km2))
+
+# Summarise habitat patch structure
+
+patch_summary <- data.frame(
+  n_habitat_cells = nrow(hab_cells),
+  n_patches = nrow(hab_patches),
+  total_habitat_area_km2 = sum(
+    hab_patches$patch_area_km2,
+    na.rm = TRUE
+  ),
+  mean_patch_area_km2 = mean(
+    hab_patches$patch_area_km2,
+    na.rm = TRUE
+  ),
+  max_patch_area_km2 = max(
+    hab_patches$patch_area_km2,
+    na.rm = TRUE
+  ),
+  mean_patch_score = mean(
+    hab_patches$mean_habitat_score,
+    na.rm = TRUE
+  )
+)
+
+patch_summary
+
+
+# Plot habitat patches
+
+plot(
+  hab_patches["patch_id"],
+  main = "Potential habitat patches"
 )
 
 plot(
-  bird_fuzzy_data["potential_habitat"],
-  main = "Potential habitat cells"
+  hab_patches["mean_habitat_score"],
+  main = "Mean habitat score by patch"
 )
+
+# Check largest patches
+
+largest_patches <- hab_patches %>%
+  st_drop_geometry() %>%
+  arrange(desc(patch_area_km2)) %>%
+  select(
+    patch_id,
+    n_cells,
+    patch_area_km2,
+    mean_habitat_score,
+    max_habitat_score,
+    shape_complexity
+  )
+
+largest_patches
+
+
+# =========================================================
+# 15. Validate whether potential habitat captures Abs
+# =========================================================
+
+# Calculate Abs captured by potential habitat cells
+
+abs_capture_summary <- bird_fuzzy_data %>%
+  st_drop_geometry() %>%
+  group_by(potential_habitat) %>%
+  summarise(
+    n_cells = n(),
+    total_Abs = sum(Abs, na.rm = TRUE),
+    mean_Abs = mean(Abs, na.rm = TRUE),
+    median_Abs = median(Abs, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+abs_capture_summary$total_cells <- sum(abs_capture_summary$n_cells)
+
+abs_capture_summary$total_Abs_all <- sum(
+  abs_capture_summary$total_Abs,
+  na.rm = TRUE
+)
+
+abs_capture_summary$cell_share <- 
+  abs_capture_summary$n_cells / abs_capture_summary$total_cells
+
+abs_capture_summary$Abs_share <- 
+  abs_capture_summary$total_Abs / abs_capture_summary$total_Abs_all
+
+abs_capture_summary$Abs_enrichment <- 
+  abs_capture_summary$Abs_share / abs_capture_summary$cell_share
+
+abs_capture_summary
+
+# Plot cell share vs Abs share
+
+abs_capture_plot <- abs_capture_summary %>%
+  filter(potential_habitat == 1)
+
+capture_compare <- data.frame(
+  metric = c(
+    "Cell share",
+    "Abs share"
+  ),
+  value = c(
+    abs_capture_plot$cell_share,
+    abs_capture_plot$Abs_share
+  )
+)
+
+ggplot(
+  capture_compare,
+  aes(
+    x = metric,
+    y = value
+  )
+) +
+  geom_col() +
+  theme_bw() +
+  labs(
+    title = "Abs captured by potential habitat cells",
+    x = "",
+    y = "Proportion"
+  )
