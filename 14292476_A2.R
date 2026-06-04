@@ -10,6 +10,7 @@ library(dplyr)
 library(tidyr)
 library(ggplot2)
 library(igraph)
+
 # =========================================================
 # 1. Read and preprocess spatial data
 # =========================================================
@@ -17,10 +18,7 @@ library(igraph)
 birds_grid <- st_read("./data/Birds/GM_Birds_2025.shp")
 birds_lcm  <- rast("./data/Birds/gm_lcm_2022.tif")
 
-# Data preprocess
-# geometry correction
 birds_grid <- st_make_valid(birds_grid)
-# Create grid ID
 birds_grid$grid_id <- seq_len(nrow(birds_grid))
 
 # Check CRS
@@ -29,23 +27,19 @@ crs(birds_grid) == crs(birds_lcm)
 # =========================================================
 # 2. Clip and extract land-cover raster values
 # =========================================================
-# Clip land-cover
 birds_vect <- vect(birds_grid)
 
 birds_lcm_clip <- crop(birds_lcm, birds_vect)
 birds_lcm_mask <- mask(birds_lcm_clip, birds_vect)
 
-# Extract land-cover in each grid
 lc_extract <- terra::extract( birds_lcm_mask, birds_vect )
 lc_extract <- lc_extract[, 1:2]
 names(lc_extract) <- c("grid_id", "lc_class")
-# Delete 0 = NA
 lc_extract <- subset(lc_extract,!is.na(lc_class) & lc_class != 0)
 
 # =========================================================
 # 3. Reclassify land-cover codes
 # =========================================================
-# Land-cover class table
 lc_n2c <- data.frame(
   lc_class = c(1, 2, 3, 4, 5, 6, 7, 8, 9),
   lc_name = c("Woodland","Conifer","Arable",
@@ -57,7 +51,6 @@ lc_extract <- merge(lc_extract,lc_n2c,by = "lc_class",all.x = TRUE)
 # =========================================================
 # 4. Calculate land-cover composition per grid cell
 # =========================================================
-# Count the number for each land-cover
 lc_counts <- aggregate(
   lc_class ~ grid_id + lc_name,
   data = lc_extract,
@@ -65,23 +58,19 @@ lc_counts <- aggregate(
 
 names(lc_counts)[3] <- "n_pixels"
 
-# Count total pixels by fishnet
 lc_totals <- aggregate(
-  n_pixels ~ grid_id, 
-  data = lc_counts, 
+  n_pixels ~ grid_id,
+  data = lc_counts,
   FUN = sum )
 
 names(lc_totals)[2] <- "total_pixels"
 
-# Join pixel counts and total pixels
-lc_prop_long <- merge( 
+lc_prop_long <- merge(
   lc_counts, lc_totals,
   by = "grid_id" )
 
-# Calculate land-cover proportions within each grid cell
 lc_prop_long$prop <- lc_prop_long$n_pixels / lc_prop_long$total_pixels
 
-# Count land-cover types by grid cell
 lc_n_types <- aggregate(
   lc_name ~ grid_id,
   data = lc_prop_long,
@@ -90,7 +79,6 @@ lc_n_types <- aggregate(
 
 names(lc_n_types)[2] <- "lc_n_types"
 
-# Create land-cover combination by grid cell
 lc_combo <- aggregate(
   lc_name ~ grid_id,
   data = lc_prop_long,
@@ -99,7 +87,6 @@ lc_combo <- aggregate(
 
 names(lc_combo)[2] <- "lc_combo"
 
-# Reshape from long to wide format
 lc_prop_wide <- tidyr::pivot_wider(
   lc_prop_long[, c("grid_id", "lc_name", "prop")],
   names_from = lc_name,
@@ -107,21 +94,17 @@ lc_prop_wide <- tidyr::pivot_wider(
   values_fill = 0
 )
 
-# Combine type count, combination, and proportions
 lc_grid_summary <- merge( lc_n_types, lc_combo, by = "grid_id" )
 lc_grid_summary <- merge( lc_grid_summary, lc_prop_wide, by = "grid_id" )
 
 # =========================================================
 # 5. Summarise land-cover combinations
 # =========================================================
-# Count different land-cover combinations
 n_lc_combos <- length(unique(lc_grid_summary$lc_combo))
 
-# Count the number of fishnet cells for each combination
 lc_combo_count <- as.data.frame(table(lc_grid_summary$lc_combo))
 names(lc_combo_count) <- c("lc_combo", "n_fishnet")
 
-# Sort from most common to least common
 lc_combo_count <- lc_combo_count[
   order(lc_combo_count$n_fishnet, decreasing = TRUE),
 ]
@@ -132,18 +115,14 @@ lc_combo_count
 # =========================================================
 # 6. Cluster grid cells by land-cover composition
 # =========================================================
-# Prepare land-cover proportion data
 lc_prop_cols <- lc_n2c$lc_name
 missing_cols <- setdiff(lc_prop_cols,names(lc_grid_summary))
 for (col in missing_cols) {lc_grid_summary[[col]] <- 0}
 
-# land-cover proportion columns for clustering
 lc_kmeans_data <- lc_grid_summary[, lc_prop_cols]
 
-# Replace NA with zero
 lc_kmeans_data[is.na(lc_kmeans_data)] <- 0
 
-# Use grid_id as row names
 rownames(lc_kmeans_data) <- lc_grid_summary$grid_id
 
 
@@ -185,11 +164,9 @@ lc_kmeans <- kmeans(
   nstart = 100
 )
 
-# Add hard cluster labels
 lc_grid_summary$lc_cluster <- lc_kmeans$cluster
 
 
-# Summarise land-cover composition of each cluster
 lc_cluster_summary <- aggregate(
   lc_grid_summary[, lc_prop_cols],
   by = list(lc_cluster = lc_grid_summary$lc_cluster),
@@ -198,7 +175,6 @@ lc_cluster_summary <- aggregate(
 
 lc_cluster_summary
 
-# Map land-cover clusters
 
 birds_grid_map <- merge(
   birds_grid,
@@ -217,7 +193,6 @@ plot(
 # =========================================================
 # 7. Calculate fuzzy membership to land-cover clusters
 # =========================================================
-# Calculate distance to each cluster center
 
 cluster_centres <- lc_kmeans$centers
 
@@ -250,9 +225,6 @@ rownames(dist_to_centres) <- rownames(lc_kmeans_data)
 head(dist_to_centres)
 
 
-# Convert distance to fuzzy membership
-
-# Convert distance to similarity.
 similarity <- 1 / (dist_to_centres + 1e-6)
 
 cluster_membership <- similarity / rowSums(similarity)
@@ -268,7 +240,6 @@ head(cluster_membership)
 # =========================================================
 # 8. Join bird data with land-cover cluster membership
 # =========================================================
-# Join fuzzy membership back to land-cover grid summary
 lc_grid_summary <- merge(
   lc_grid_summary,
   cluster_membership,
@@ -278,7 +249,6 @@ lc_grid_summary <- merge(
 
 names(lc_grid_summary)
 
-# Join bird response variables with cluster membership
 bird_fuzzy_data <- merge(
   birds_grid,
   lc_grid_summary[, c("grid_id", paste0("mem_cluster_", 1:best_k), "lc_cluster")],
@@ -292,7 +262,6 @@ bird_fuzzy_data <- merge(
 bird_fuzzy_data$SR <- as.numeric(bird_fuzzy_data$SR)
 bird_fuzzy_data$Abs <- as.numeric(bird_fuzzy_data$Abs)
 
-# Standardise SR and Abs
 bird_fuzzy_data$SR_z <- as.numeric(scale(bird_fuzzy_data$SR))
 
 bird_fuzzy_data$Abs_log <- log1p(bird_fuzzy_data$Abs)
@@ -301,7 +270,6 @@ bird_fuzzy_data$Abs_log_z <- as.numeric(scale(bird_fuzzy_data$Abs_log))
 
 # Spatial block validation and stable cluster contribution
 
-# Create six spatial blocks
 
 cell_xy <- st_coordinates(
   st_centroid(bird_fuzzy_data)
@@ -349,7 +317,6 @@ plot(
   main = "Six spatial blocks for validation"
 )
 
-# Prepare model variables
 
 bird_fuzzy_data$SR <- as.numeric(bird_fuzzy_data$SR)
 bird_fuzzy_data$Abs <- as.numeric(bird_fuzzy_data$Abs)
@@ -371,7 +338,7 @@ train_block_combinations <- combn(
   simplify = FALSE
 )
 
-length(train_block_combinations)  # should be 15
+length(train_block_combinations)
 
 # Helper functions
 
@@ -389,7 +356,6 @@ standardise_by_train <- function(x, train_index) {
     sd(x[train_index], na.rm = TRUE)
 }
 
-# Exhaustive spatial block validation
 
 coef_results <- data.frame()
 validation_results <- data.frame()
@@ -410,7 +376,6 @@ for (i in seq_along(train_block_combinations)) {
   train_index <- data_i$split_i == "Train"
   test_index  <- data_i$split_i == "Test"
   
-  # Standardise responses using training blocks only
   data_i$SR_z_i <- standardise_by_train(
     data_i$SR,
     train_index
@@ -455,7 +420,6 @@ for (i in seq_along(train_block_combinations)) {
   train_i$Abs_pred_i <- predict(abs_model_i, newdata = train_i)
   test_i$Abs_pred_i  <- predict(abs_model_i, newdata = test_i)
   
-  # Store validation results
   validation_results <- rbind(
     validation_results,
     data.frame(
@@ -479,7 +443,6 @@ for (i in seq_along(train_block_combinations)) {
     )
   )
   
-  # Store contribution coefficients
   coef_results <- rbind(
     coef_results,
     data.frame(
@@ -501,7 +464,6 @@ for (i in seq_along(train_block_combinations)) {
   )
 }
 
-# Summarise coefficient stability
 
 coef_stability <- coef_results %>%
   group_by(response, cluster) %>%
@@ -521,7 +483,6 @@ coef_stability <- coef_results %>%
 
 coef_stability
 
-# Summarise validation performance
 
 validation_summary <- validation_results %>%
   group_by(response, dataset) %>%
@@ -537,8 +498,6 @@ validation_summary <- validation_results %>%
 
 validation_summary
 
-
-# Plot coefficient stability
 
 ggplot(
   coef_results,
@@ -560,7 +519,6 @@ ggplot(
     y = "Coefficient"
   )
 
-# Plot validation performance
 
 ggplot(
   validation_results,
@@ -582,7 +540,6 @@ ggplot(
     y = "Predictive R-squared"
   )
 
-# Calculate habitat score using stable SR coefficients
 
 stable_SR_coef <- coef_stability %>%
   filter(response == "SR") %>%
@@ -620,7 +577,6 @@ bird_fuzzy_data$habitat_score <- (
     min(bird_fuzzy_data$habitat_SR_raw, na.rm = TRUE)
 )
 
-# Plot stable SR contribution and habitat score
 ggplot(
   stable_SR_coef,
   aes(
@@ -665,8 +621,18 @@ summary(
 # 11. Cluster-patch-level boundary and high-value adjustment
 # =========================================================
 
+# 1. Cells belonging to the same lc_cluster and touching each other
+# 2. If a cluster patch contains high habitat scores, the whole patch
+# 3. Cells on the boundary of a cluster patch are slightly weakened
+# 4. The direction of adjustment is controlled by the SR contribution
+
 hab_var <- "habitat_score"
-# Prepare coordinate keys
+
+
+# ---------------------------------------------------------
+# 11.1 Prepare coordinate keys
+# ---------------------------------------------------------
+
 if (!all(c("cell_x", "cell_y") %in% names(bird_fuzzy_data))) {
   
   cell_xy <- st_coordinates(
@@ -722,7 +688,10 @@ cell_lookup <- data.frame(
   xy_key = bird_fuzzy_data$xy_key
 )
 
-# Helper function: get same-cluster ratio
+
+# ---------------------------------------------------------
+# 11.2 Helper function: get same-cluster ratio
+# ---------------------------------------------------------
 
 get_same_cluster_ratio <- function(x_shift, y_shift) {
   
@@ -763,7 +732,7 @@ get_same_cluster_ratio <- function(x_shift, y_shift) {
     
     if (length(neigh_id) > 0) {
       
-      same_cluster <- 
+      same_cluster <-
         bird_fuzzy_data$lc_cluster[neigh_id] ==
         bird_fuzzy_data$lc_cluster[i]
       
@@ -782,7 +751,10 @@ get_same_cluster_ratio <- function(x_shift, y_shift) {
   )
 }
 
-# Calculate rook same-cluster ratio
+
+# ---------------------------------------------------------
+# 11.3 Calculate rook same-cluster ratio
+# ---------------------------------------------------------
 
 rook_N <- get_same_cluster_ratio(0, grid_dy)
 rook_S <- get_same_cluster_ratio(0, -grid_dy)
@@ -809,7 +781,8 @@ bird_fuzzy_data$rook_same_cluster_ratio[
   is.na(bird_fuzzy_data$rook_same_cluster_ratio)
 ] <- 0.5
 
-bird_fuzzy_data$strict_rook_interior <- 
+
+bird_fuzzy_data$strict_rook_interior <-
   bird_fuzzy_data$n_rook_neighbours == 4 &
   bird_fuzzy_data$rook_same_cluster_ratio == 1
 
@@ -827,7 +800,11 @@ table(
   bird_fuzzy_data$edge_boundary_type
 )
 
-# Identify connected cluster patches
+
+# ---------------------------------------------------------
+# 11.4 Identify connected cluster patches
+# ---------------------------------------------------------
+
 
 touch_list_all <- st_touches(
   bird_fuzzy_data
@@ -861,6 +838,7 @@ for (i in seq_len(nrow(bird_fuzzy_data))) {
     }
   }
 }
+
 
 if (nrow(cluster_patch_graph_edges) == 0) {
   
@@ -901,7 +879,10 @@ length(
   )
 )
 
-# Calculate cluster-patch-level habitat signal
+
+# ---------------------------------------------------------
+# 11.5 Calculate cluster-patch-level habitat signal
+# ---------------------------------------------------------
 
 cluster_patch_summary <- bird_fuzzy_data %>%
   st_drop_geometry() %>%
@@ -931,11 +912,9 @@ cluster_patch_summary <- bird_fuzzy_data %>%
 cluster_patch_summary
 
 
-# Define high-value cluster patches
-
 cluster_patch_high_threshold <- quantile(
   bird_fuzzy_data$habitat_score,
-  probs = 0.70,
+  probs = 0.80,
   na.rm = TRUE
 )
 
@@ -950,8 +929,6 @@ table(
   cluster_patch_summary$patch_high_value
 )
 
-
-# Join patch-level metrics back to grid cells.
 
 bird_fuzzy_data <- bird_fuzzy_data %>%
   select(
@@ -978,7 +955,10 @@ bird_fuzzy_data <- bird_fuzzy_data %>%
     by = "cluster_patch_id"
   )
 
-# Prepare signed cluster weights
+
+# ---------------------------------------------------------
+# 11.6 Prepare signed cluster weights
+# ---------------------------------------------------------
 
 cluster_weight_table <- stable_SR_coef %>%
   mutate(
@@ -1022,7 +1002,12 @@ bird_fuzzy_data$cluster_weight[
   is.na(bird_fuzzy_data$cluster_weight)
 ] <- 0
 
-# Sensitivity test for patch and boundary adjustment
+
+# ---------------------------------------------------------
+# 11.7 Sensitivity test for patch and boundary adjustment
+# ---------------------------------------------------------
+
+
 patch_alpha_values <- c(
   0,
   0.02,
@@ -1045,11 +1030,13 @@ for (patch_alpha_i in patch_alpha_values) {
   
   for (boundary_alpha_i in boundary_alpha_values) {
     
+    
     patch_effect_i <- ifelse(
       bird_fuzzy_data$patch_high_value == 1,
       0.5,
       0
     )
+    
     
     boundary_effect_i <- ifelse(
       bird_fuzzy_data$strict_rook_interior,
@@ -1057,13 +1044,12 @@ for (patch_alpha_i in patch_alpha_values) {
       -0.5
     )
     
-    # Signed by cluster contribution.
     
-    signed_patch_effect_i <- 
+    signed_patch_effect_i <-
       bird_fuzzy_data$cluster_weight *
       patch_effect_i
     
-    signed_boundary_effect_i <- 
+    signed_boundary_effect_i <-
       bird_fuzzy_data$cluster_weight *
       boundary_effect_i
     
@@ -1164,9 +1150,12 @@ ggplot(
   )
 
 
-# Select these manually after inspecting the sensitivity table and plot.
+# ---------------------------------------------------------
+# 11.8 Apply manually selected patch-boundary adjustment
+# ---------------------------------------------------------
 
-final_patch_alpha <- 0.08
+
+final_patch_alpha <- 0.1
 final_boundary_alpha <- 0.1
 
 
@@ -1179,19 +1168,12 @@ selected_patch_boundary_setting <- patch_boundary_tuning_summary %>%
 selected_patch_boundary_setting
 
 
-# Patch-level effect:
-# High-value cluster patch strengthens all cells in the patch.
-
 bird_fuzzy_data$patch_high_value_effect <- ifelse(
   bird_fuzzy_data$patch_high_value == 1,
   0.5,
   0
 )
 
-
-# Boundary effect:
-# Interior = +0.5
-# Boundary = -0.5
 
 bird_fuzzy_data$edge_boundary_effect <- ifelse(
   bird_fuzzy_data$strict_rook_interior,
@@ -1200,14 +1182,11 @@ bird_fuzzy_data$edge_boundary_effect <- ifelse(
 )
 
 
-# Signed effects:
-# Direction depends on whether the cluster contribution is positive or negative.
-
-bird_fuzzy_data$signed_patch_effect <- 
+bird_fuzzy_data$signed_patch_effect <-
   bird_fuzzy_data$cluster_weight *
   bird_fuzzy_data$patch_high_value_effect
 
-bird_fuzzy_data$signed_edge_effect <- 
+bird_fuzzy_data$signed_edge_effect <-
   bird_fuzzy_data$cluster_weight *
   bird_fuzzy_data$edge_boundary_effect
 
@@ -1220,13 +1199,11 @@ bird_fuzzy_data$signed_edge_effect[
 ] <- 0
 
 
-# Final combined adjustment factor.
-
-bird_fuzzy_data$combined_adjustment <- 
+bird_fuzzy_data$combined_adjustment <-
   final_patch_alpha * bird_fuzzy_data$signed_patch_effect +
   final_boundary_alpha * bird_fuzzy_data$signed_edge_effect
 
-bird_fuzzy_data$habitat_score_context <- 
+bird_fuzzy_data$habitat_score_context <-
   bird_fuzzy_data[[hab_var]] *
   (
     1 + bird_fuzzy_data$combined_adjustment
@@ -1240,7 +1217,10 @@ bird_fuzzy_data$habitat_score_context <- pmax(
   )
 )
 
-# Classify and check final adjustment
+
+# ---------------------------------------------------------
+# 11.9 Classify and check final adjustment
+# ---------------------------------------------------------
 
 bird_fuzzy_data$edge_boundary_type <- ifelse(
   bird_fuzzy_data$strict_rook_interior,
@@ -1336,7 +1316,6 @@ ggplot(
 # 12. Define potential habitat cells
 # =========================================================
 
-# Threshold sensitivity test
 
 threshold_probs <- c(
   0.50,
@@ -1358,7 +1337,9 @@ for (p in threshold_probs) {
   
   habitat_i <- ifelse(
     bird_fuzzy_data$habitat_score_context >= threshold_i,
-    1,0)
+    1,
+    0
+  )
   
   threshold_summary <- rbind(
     threshold_summary,
@@ -1379,9 +1360,8 @@ for (p in threshold_probs) {
 
 threshold_summary
 
-# Choose main habitat threshold
 
-hab_threshold_prob <- 0.8
+hab_threshold_prob <- 0.80
 
 hab_threshold <- quantile(
   bird_fuzzy_data$habitat_score_context,
@@ -1391,7 +1371,6 @@ hab_threshold <- quantile(
 
 hab_threshold
 
-# Define potential habitat cells
 
 bird_fuzzy_data$potential_habitat <- ifelse(
   bird_fuzzy_data$habitat_score_context >= hab_threshold,
@@ -1403,7 +1382,6 @@ bird_fuzzy_data$potential_habitat <- as.factor(
   bird_fuzzy_data$potential_habitat
 )
 
-# Plot potential habitat cells
 
 plot(
   bird_fuzzy_data["potential_habitat"],
@@ -1425,7 +1403,6 @@ if (nrow(hab_cells) == 0) {
   
 }
 
-# Identify connected habitat patches
 
 if (nrow(hab_cells) == 1) {
   
@@ -1449,7 +1426,6 @@ if (nrow(hab_cells) == 1) {
   hab_cells$patch_id <- hab_comp$membership
 }
 
-# Dissolve cells into habitat patches
 
 hab_patches <- hab_cells %>%
   group_by(
@@ -1477,15 +1453,13 @@ hab_patches <- hab_cells %>%
   )
 
 
-# Calculate patch-level metrics
-
 hab_patches$patch_area_m2 <- as.numeric(
   st_area(
     hab_patches
   )
 )
 
-hab_patches$patch_area_km2 <- 
+hab_patches$patch_area_km2 <-
   hab_patches$patch_area_m2 / 1e6
 
 hab_patches$patch_perimeter_m <- as.numeric(
@@ -1496,13 +1470,11 @@ hab_patches$patch_perimeter_m <- as.numeric(
   )
 )
 
-hab_patches$patch_perimeter_km <- 
+hab_patches$patch_perimeter_km <-
   hab_patches$patch_perimeter_m / 1000
 
 
-# Shape complexity
-
-hab_patches$shape_complexity <- 
+hab_patches$shape_complexity <-
   hab_patches$patch_perimeter_km /
   (
     2 * sqrt(
@@ -1510,8 +1482,6 @@ hab_patches$shape_complexity <-
     )
   )
 
-
-# Summarise habitat patch structure
 
 patch_summary <- data.frame(
   n_habitat_cells = nrow(
@@ -1549,8 +1519,6 @@ patch_summary <- data.frame(
 patch_summary
 
 
-# Plot habitat patches
-
 plot(
   hab_patches["patch_id"],
   main = "Potential habitat patches"
@@ -1561,8 +1529,6 @@ plot(
   main = "Mean habitat score by patch"
 )
 
-
-# Check largest patches
 
 largest_patches <- hab_patches %>%
   st_drop_geometry() %>%
@@ -1589,7 +1555,6 @@ largest_patches
 # 15. Validate whether potential habitat captures Abs
 # =========================================================
 
-# Calculate Abs captured by potential habitat cells
 abs_capture_summary <- bird_fuzzy_data %>%
   st_drop_geometry() %>%
   group_by(
@@ -1621,22 +1586,21 @@ abs_capture_summary$total_Abs_all <- sum(
   na.rm = TRUE
 )
 
-abs_capture_summary$cell_share <- 
+abs_capture_summary$cell_share <-
   abs_capture_summary$n_cells /
   abs_capture_summary$total_cells
 
-abs_capture_summary$Abs_share <- 
+abs_capture_summary$Abs_share <-
   abs_capture_summary$total_Abs /
   abs_capture_summary$total_Abs_all
 
-abs_capture_summary$Abs_enrichment <- 
+abs_capture_summary$Abs_enrichment <-
   abs_capture_summary$Abs_share /
   abs_capture_summary$cell_share
 
 abs_capture_summary
 
 
-# Plot cell share vs Abs share
 abs_capture_plot <- abs_capture_summary %>%
   filter(
     potential_habitat == 1
